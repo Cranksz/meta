@@ -1,0 +1,43 @@
+# Write any rules in normal language. Every rule becomes a new ability.
+
+- When I say "create a horse" or "اصنع حصان":
+  Spawn horse.glb in front of me at 1.65m height using the green Matrix build effect.
+
+- When I say "create a dragon" or "اصنع تنين":
+  Spawn dragon.glb in front of me at 2.2m height using the green Matrix build effect, with fire sparks around it.
+
+- When I say "cover it with Algerian flag" or "غطه بعلم الجزائر":
+  Drape a silky cloth (using algeria.png if imported, otherwise the default Algerian flag) over the last object. Make it grabbable.
+
+- When I say "make cloth burn" or "burn the flag" or "احرق العلم":
+  Dissolve the cloth/flag organically over 5 seconds with a glowing orange-red ember edge (#ff5500), and spread fire and rising dark smoke right along the dissolving edges.
+
+- When I say "delete" or "احذف":
+  Dissolve and remove everything in the scene with green Matrix digital particles. If we were inside the forest, switch the environment to the gray Matrix Construct.
+
+- When I say "give me a pen" or "اعطني قلم":
+  Give me the 3D space pen.
+
+- When I say "give gravity to the next drawing" or "اعطي جاذبية للرسمة التالية":
+  Turn on gravity for the next 3D drawing stroke so it falls and collides like a chain.
+
+- When I say "put me in the forest" or "اجعلني في الغابة":
+  Spawn forest.glb huge all around me using radial Matrix expansion.
+
+- When I say "create a car" or "اصنع سيارة":
+  Spawn car.glb in front of me at 3.9m length with Matrix build.
+
+- When I say "make it small" or "اجعلها صغيرة":
+  Shrink the car to 0.35m handheld size near me and make it grabbable so I can inspect it with the controller.
+
+- When I say "create a water tank" or "اصنع حوض ماء":
+  Spawn the realistic interactive glass water tank in front of me.
+
+- When I say "give me a magic pen" or "اعطني قلم سحري":
+  Give me the magic pen that turns whatever fish shape I draw into a real swimming fish.
+
+- When I say "freeze the horse" or "جمّد الحصان":
+  Turn the horse into glossy translucent icy blue (#9ee8ff), pause its animation, and emit frost sparks around it.
+
+- When I say "zero gravity" or "انعدام الجاذبية":
+  Set world gravity to 0 so loose objects float.
