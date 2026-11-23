@@ -41,3 +41,6 @@
 
 - When I say "zero gravity" or "انعدام الجاذبية":
   Set world gravity to 0 so loose objects float.
+
+- When I say "اضف نافذة":
+  make a square shape portal with rainbow world inside
