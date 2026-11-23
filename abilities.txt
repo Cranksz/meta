@@ -44,40 +44,58 @@
 
 - When I say "اضف نافذة":
   make a square shape portal with rainbow world inside
-- When I draw a flower shape or say "create a flower" or "اصنع زهرة":
-  Recognize my hand-drawn flower outline and transform it into a beautiful realistic 3D flower. Grow petals organically from my drawing, add a green stem and leaves, and make it bloom with a magical green Matrix particle effect.
+
+- When i say "create a flower" or "اصنع زهرة":
+   transform my drawing into a beautiful realistic 3D flower. Grow petals organically from my drawing, add a green stem and leaves, and make it bloom with a magical green Matrix particle effect.
+
 - When I say "passthrough" or "show my real world" or "اظهر الواقع":
   Immediately switch back to Meta Quest passthrough mode, making the real physical environment visible again.
+
 - When I say "piano" or "create a piano" or "اصنع بيانو":
   Spawn a beautiful realistic full-size 3D grand piano in front of me using the Matrix construction effect. Make it interactive, with working piano keys that produce actual musical notes when touched.
+
 - When I say "portal" or "create a portal" or "اصنع بوابة":
-  Create a large magical dimensional portal in front of me with an animated, dancing, fluid organic shape. Use world.jpg as the living world visible inside the portal. Add swirling energy, glowing edges, floating particles, and a powerful dimensional opening animation.
-- When I draw a star shape or say "create a star" or "اصنع نجمة":
+  Create a large magical dimensional portal in front of me with an animated, dancing, fluid organic shape. spawn world.jpg as the living world visible inside the portal. Add swirling energy, glowing edges, floating particles, and a powerful dimensional opening animation.
+
+- When I say "create a star" or "اصنع نجمة":
   Transform my drawing into a beautiful glowing 3D star with golden light, sparkling particles, and a magical floating animation.
+
 - When I draw a heart shape or say "create a heart" or "اصنع قلب":
-  Transform my drawing into a realistic floating 3D anatomical heart or a beautiful glowing red heart, with a subtle organic beating animation.
+  Transform my drawing into a realistic floatin 3D anatomical heart or a beautiful glowing red heart, with a subtle organic beating animation.
+
 - When I draw a butterfly shape or say "create a butterfly" or "اصنع فراشة":
   Transform my drawing into a realistic colorful 3D butterfly with animated wings. Make it fly naturally around me.
+
 - When I say "make it rain" or "اجعلها تمطر":
   Create realistic rain throughout the environment, with individual droplets, splashes, and wet reflective surfaces.
+
 - When I say "create a tornado" or "اصنع اعصار":
   Generate a realistic rotating tornado in front of me, with swirling wind particles, dust, and flying debris.
+
 - When I say "make it float" or "اجعله يطفو":
   Make the last object levitate smoothly in front of me with a subtle magical energy effect.
+
 - When I say "clone it" or "استنسخه":
   Create three identical copies of the last object using the green Matrix construction effect, arranged around the original.
+
 - When I say "turn it into gold" or "حوله إلى ذهب":
   Transform the last object into polished reflective gold, with golden Matrix particles spreading across its surface.
+
 - When I say "make it transparent" or "اجعله شفاف":
   Turn the last object into translucent glass while preserving its original shape and details.
+
 - When I say "explode" or "فجره":
   Make the last object explode into hundreds of realistic glowing particles, then slowly reconstruct it using the green Matrix effect.
+
 - When I say "open a black hole" or افتح ثقب" أسود":
   Create a swirling black hole in front of me with a distorted gravitational field. Nearby loose objects should slowly move toward it.
+
 - When I say "create a galaxy" or "اصنع مجرة":
   Generate a huge rotating galaxy with colorful nebulae, stars, and cosmic dust surrounding me.
+
 - When I say "underwater world" or "اجعلني تحت الماء":
   Transform the environment into a beautiful underwater world with realistic lighting, floating particles, bubbles, and swimming fish.
+
 - When I say "lightning" or "اصنع برق":
   Generate realistic lightning bolts from my hand toward a selected object, with bright flashes, electrical arcs, and temporary illumination of the environment.
 - When I say "create a hologram" or "اصنع هولوغرام":
