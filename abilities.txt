@@ -1,5 +1,5 @@
-# ==========================================================
-# SAY IT, SEE IT — FULL MODULAR ABILITIES (abilities.txt)
+
+# SAY IT, SEE IT — REALISTIC MODULAR ABILITIES (abilities.txt)
 # ==========================================================
 
 @ability: spawn_horse
@@ -45,7 +45,7 @@ if (cd) {
   }
   center.multiplyScalar(4 / cd.N);
 }
-const fireLight = new APP.THREE.PointLight(0xff5e14, 2.6, 7.5, 2.0);
+const fireLight = new APP.THREE.PointLight(0xff5e14, 2.8, 7.5, 2.0);
 fireLight.position.copy(center).add(new APP.THREE.Vector3(0, 0.28, 0));
 APP.scene.add(fireLight);
 
@@ -113,7 +113,7 @@ for (const e of APP.entities) {
   if (!e.dissolveStart && e.grabbable) {
     e.physBob = 0.045;
     e.baseY = e.root.position.y;
-    APP.fx.spawnBox(APP.computeBox(e.root), "glow", 12);
+    APP.fx.spawnBox(APP.computeBox(e.root), "glow", 10);
   }
 }
 APP.say("🪐 انعدام الجاذبية — الأجسام تطفو الآن");
@@ -134,7 +134,7 @@ const pickTarget = () => {
   if (held) return held;
   let best = null, bestD = 0.65;
   for (const e of APP.entities) {
-    if (e.dissolveStart || e.type === "forest" || e.type === "env") continue;
+    if (e.dissolveStart || e.type === "forest" || e.type === "env_360") continue;
     const b = APP.computeBox(e.root);
     for (const h of APP.hands) {
       if (h.isDesk) continue;
@@ -151,7 +151,7 @@ APP.modify({ target: ent.id, scale: 0.35, moveNearHand: true, grabbable: true, p
 
 @ability: spawn_water_tank
 @match: water & tank | water | tank | pool | اصنع حوض ماء | حوض ماء | حوض
-@do: APP.spawnWaterTank({ dist: 1.65, width: 1.45, depth: 0.95 });
+@do: APP.spawnWaterTank({ dist: 1.6, width: 1.45, depth: 0.95 });
 
 @ability: magic_pen
 @match: magic & pen | قلم سحري
@@ -159,213 +159,118 @@ APP.modify({ target: ent.id, scale: 0.35, moveNearHand: true, grabbable: true, p
 const THREE = APP.THREE;
 APP.spawnPen({ mode: "magic" });
 
-// Helper: build procedural 3D shapes for flower, reflective heart, cat, house, butterfly
-const createShape3D = (kind, center, size) => {
-  const s = Math.max(0.22, Math.min(0.65, size));
+// Realistic procedural fallback 3D models or GLB lookup for magic pen shapes
+const spawnMagicShape = async (kind, center, sz) => {
+  const tryFile = kind + ".glb";
+  const url = APP.findGLB(tryFile);
+  if (!url.startsWith("./")) {
+    const ent = await APP.spawnGLB({ file: tryFile, name: kind, height: Math.max(0.28, sz), dist: 1.5, grabbable: true });
+    ent.root.position.copy(center);
+    return ent;
+  }
+
   const root = new THREE.Group();
   root.position.copy(center);
   root.rotation.y = Math.atan2(-APP.headFwd.x, -APP.headFwd.z);
+  const s = Math.max(0.22, Math.min(0.55, sz));
+  const env = APP.updateReflection(center);
 
-  if (kind === "flower") {
-    const stemCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, -s * 0.7, 0),
-      new THREE.Vector3(s * 0.04, -s * 0.3, s * 0.02),
-      new THREE.Vector3(0, 0.04 * s, 0)
-    ]);
-    const greenMat = new THREE.MeshPhysicalMaterial({ color: 0x1e8a3e, roughness: 0.42, clearcoat: 0.2 });
-    const stem = new THREE.Mesh(new THREE.TubeGeometry(stemCurve, 16, s * 0.028, 10, false), greenMat);
-    root.add(stem);
-    for (const side of [-1, 1]) {
-      const leafGeo = new THREE.SphereGeometry(s * 0.14, 12, 10);
-      leafGeo.scale(1.6, 0.16, 0.75);
-      const leaf = new THREE.Mesh(leafGeo, greenMat);
-      leaf.position.set(side * s * 0.14, -s * 0.36 + side * 0.04 * s, 0);
-      leaf.rotation.z = side * 0.45;
-      root.add(leaf);
-    }
-    const core = new THREE.Mesh(
-      new THREE.SphereGeometry(s * 0.14, 18, 14),
-      new THREE.MeshPhysicalMaterial({ color: 0xffc828, emissive: 0x553300, roughness: 0.5 })
-    );
-    core.scale.set(1, 0.6, 1);
-    core.position.y = s * 0.06;
-    core.rotation.x = 0.45;
-    root.add(core);
-    const petalMat = new THREE.MeshPhysicalMaterial({ color: 0xff3b8d, emissive: 0x380018, roughness: 0.25, clearcoat: 0.7, side: THREE.DoubleSide });
-    const head = new THREE.Group();
-    head.position.y = s * 0.06;
-    head.rotation.x = 0.45;
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * Math.PI * 2;
-      const pGeo = new THREE.SphereGeometry(s * 0.17, 12, 10);
-      pGeo.scale(0.65, 0.12, 1.45);
-      pGeo.translate(0, 0, s * 0.22);
-      const pet = new THREE.Mesh(pGeo, petalMat);
-      pet.rotation.y = a;
-      pet.rotation.x = i % 2 === 0 ? -0.22 : -0.38;
-      head.add(pet);
-    }
-    root.add(head);
-  } else if (kind === "heart") {
+  if (kind === "heart") {
     const hs = new THREE.Shape();
     hs.moveTo(0, s * 0.18);
     hs.bezierCurveTo(s * 0.05, s * 0.45, s * 0.48, s * 0.42, s * 0.45, s * 0.08);
     hs.bezierCurveTo(s * 0.42, -s * 0.22, s * 0.12, -s * 0.36, 0, -s * 0.48);
     hs.bezierCurveTo(-s * 0.12, -s * 0.36, -s * 0.42, -s * 0.22, -s * 0.45, s * 0.08);
     hs.bezierCurveTo(-s * 0.48, s * 0.42, -s * 0.05, s * 0.45, 0, s * 0.18);
-    const hg = new THREE.ExtrudeGeometry(hs, { depth: s * 0.18, bevelEnabled: true, bevelThickness: s * 0.07, bevelSize: s * 0.06, bevelSegments: 6 });
+    const hg = new THREE.ExtrudeGeometry(hs, { depth: s * 0.16, bevelEnabled: true, bevelThickness: s * 0.065, bevelSize: s * 0.055, bevelSegments: 8 });
     hg.center();
-    const hMat = new THREE.MeshPhysicalMaterial({
-      color: 0xff1644, emissive: 0x3a0010, metalness: 0.92, roughness: 0.05, clearcoat: 1.0, clearcoatRoughness: 0.04, envMapIntensity: 2.8
-    });
-    const hm = new THREE.Mesh(hg, hMat);
+    const hm = new THREE.Mesh(hg, new THREE.MeshPhysicalMaterial({
+      color: 0xcc0a2f, envMap: env, envMapIntensity: 3.0, metalness: 0.94, roughness: 0.04, clearcoat: 1.0
+    }));
     root.add(hm);
-    APP.onTick("heart_pulse_" + Math.random(), 0, (dt, t) => {
-      if (!root.parent) return;
-      const beat = 1 + Math.pow(Math.max(0, Math.sin(t * 3.8)), 6) * 0.09;
-      hm.scale.setScalar(beat);
-    });
-  } else if (kind === "cat") {
-    const fur = new THREE.MeshPhysicalMaterial({ color: 0xe89a4c, roughness: 0.65, sheen: 0.7 });
-    const white = new THREE.MeshPhysicalMaterial({ color: 0xfff5e8, roughness: 0.65 });
-    const eyeM = new THREE.MeshPhysicalMaterial({ color: 0x22ff88, emissive: 0x0a5522, roughness: 0.1, clearcoat: 1 });
-    const body = new THREE.Mesh(new THREE.SphereGeometry(s * 0.24, 18, 16), fur);
-    body.scale.set(0.85, 1.25, 0.95); body.position.y = -s * 0.18; root.add(body);
-    const chest = new THREE.Mesh(new THREE.SphereGeometry(s * 0.16, 14, 12), white);
-    chest.position.set(0, -s * 0.12, s * 0.13); root.add(chest);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(s * 0.19, 18, 16), fur);
-    head.position.set(0, s * 0.16, s * 0.04); root.add(head);
-    for (const sd of [-1, 1]) {
-      const ear = new THREE.Mesh(new THREE.ConeGeometry(s * 0.075, s * 0.16, 8), fur);
-      ear.position.set(sd * s * 0.11, s * 0.34, s * 0.03); ear.rotation.z = -sd * 0.25; root.add(ear);
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(s * 0.035, 10, 8), eyeM);
-      eye.position.set(sd * s * 0.075, s * 0.19, s * 0.20); root.add(eye);
-      const paw = new THREE.Mesh(new THREE.SphereGeometry(s * 0.055, 10, 8), white);
-      paw.position.set(sd * s * 0.09, -s * 0.42, s * 0.15); root.add(paw);
+  } else if (kind === "flower") {
+    const green = new THREE.MeshPhysicalMaterial({ color: 0x1b6131, roughness: 0.48, clearcoat: 0.25 });
+    const stem = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([new THREE.Vector3(0,-s*0.65,0), new THREE.Vector3(s*0.03,-s*0.3,0), new THREE.Vector3(0,0,0)]), 16, s*0.02, 10, false), green);
+    root.add(stem);
+    const petalMat = new THREE.MeshPhysicalMaterial({ color: 0xde2e68, roughness: 0.28, clearcoat: 0.4, sheen: 0.8, side: THREE.DoubleSide });
+    const head = new THREE.Group(); head.rotation.x = 0.4;
+    head.add(new THREE.Mesh(new THREE.SphereGeometry(s*0.09, 16, 12), new THREE.MeshStandardMaterial({ color: 0xe6a820, roughness: 0.7 })));
+    for (let i = 0; i < 12; i++) {
+      const pGeo = new THREE.SphereGeometry(s * 0.15, 14, 12); pGeo.scale(0.6, 0.08, 1.5); pGeo.translate(0, 0, s * 0.2);
+      const pet = new THREE.Mesh(pGeo, petalMat); pet.rotation.y = (i / 12) * Math.PI * 2; pet.rotation.x = -0.25 - (i % 2) * 0.14;
+      head.add(pet);
     }
-    const nose = new THREE.Mesh(new THREE.SphereGeometry(s * 0.022, 8, 8), new THREE.MeshStandardMaterial({ color: 0xff7799 }));
-    nose.position.set(0, s * 0.14, s * 0.23); root.add(nose);
-    const tailCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, -s * 0.36, -s * 0.15),
-      new THREE.Vector3(s * 0.14, -s * 0.28, -s * 0.28),
-      new THREE.Vector3(s * 0.18, -s * 0.05, -s * 0.25)
-    ]);
-    const tail = new THREE.Mesh(new THREE.TubeGeometry(tailCurve, 14, s * 0.035, 8, false), fur);
-    root.add(tail);
-  } else if (kind === "house") {
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(s * 0.72, s * 0.48, s * 0.62), new THREE.MeshStandardMaterial({ color: 0xf0e4d2, roughness: 0.75 }));
-    wall.position.y = -s * 0.1; root.add(wall);
-    const roof = new THREE.Mesh(new THREE.ConeGeometry(s * 0.58, s * 0.38, 4), new THREE.MeshStandardMaterial({ color: 0xb53c2a, roughness: 0.65 }));
-    roof.rotation.y = Math.PI / 4; roof.position.y = s * 0.32; root.add(roof);
-    const door = new THREE.Mesh(new THREE.BoxGeometry(s * 0.16, s * 0.28, s * 0.03), new THREE.MeshStandardMaterial({ color: 0x5c3317, roughness: 0.5 }));
-    door.position.set(0, -s * 0.2, s * 0.31); root.add(door);
-    const winMat = new THREE.MeshStandardMaterial({ color: 0xffe49e, emissive: 0xffaa33, emissiveIntensity: 1.4 });
-    for (const sd of [-1, 1]) {
-      const w = new THREE.Mesh(new THREE.BoxGeometry(s * 0.13, s * 0.13, s * 0.03), winMat);
-      w.position.set(sd * s * 0.21, -s * 0.05, s * 0.31); root.add(w);
+    root.add(head);
+  } else if (kind === "house" || kind === "cat") {
+    const gltf = await new Promise((res, rej) => APP.gltfLoader.load("./" + kind + ".glb", res, undefined, rej)).catch(() => null);
+    if (gltf) {
+      const m = APP.SkeletonUtils.clone(gltf.scene);
+      const b0 = APP.computeBox(m), mx = Math.max(0.01, b0.getSize(new THREE.Vector3()).y);
+      m.scale.setScalar(s / mx); root.add(m);
+    } else {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(s * 0.7, s * 0.6, s * 0.6), new THREE.MeshPhysicalMaterial({ color: 0xd8cfc4, roughness: 0.65 }));
+      root.add(m);
     }
-    const chim = new THREE.Mesh(new THREE.BoxGeometry(s * 0.1, s * 0.24, s * 0.1), new THREE.MeshStandardMaterial({ color: 0x6e3b30, roughness: 0.8 }));
-    chim.position.set(s * 0.18, s * 0.35, -s * 0.1); root.add(chim);
   }
 
   root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   APP.scene.add(root);
-  const b = APP.computeBox(root);
-  const mxU = APP.applyDissolveShader(root, b.min.y, b.max.y, false);
-  APP.fx.spawnBox(b, "sparks", 35);
-  return APP.registerEntity({
-    name: kind, type: "magic_shape", root, box: b, matrixUniforms: mxU,
-    buildDur: 1.0, grabbable: true, physBob: kind === "heart" ? 0.03 : 0, baseY: root.position.y
-  });
+  const b = APP.computeBox(root), mxU = APP.applyDissolveShader(root, b.min.y, b.max.y, false);
+  return APP.registerEntity({ name: kind, type: "magic_shape", root, box: b, matrixUniforms: mxU, buildDur: 0.9, grabbable: true });
 };
 
-// Reusable butterfly spawner attached to APP
-APP._spawnButterfly = (pos, scale = 0.24) => {
+// Realistic animated butterfly spawner
+APP._spawnButterfly = (pos, scale = 0.2) => {
   const c = document.createElement("canvas"); c.width = 256; c.height = 256;
   const g = c.getContext("2d");
   const grad = g.createRadialGradient(40, 128, 10, 140, 128, 180);
-  grad.addColorStop(0, "#fff078"); grad.addColorStop(0.28, "#ff7b1c"); grad.addColorStop(0.65, "#00d4ff"); grad.addColorStop(1, "#111018");
+  grad.addColorStop(0, "#ffe47a"); grad.addColorStop(0.28, "#eb6b15"); grad.addColorStop(0.68, "#1895c7"); grad.addColorStop(1, "#101014");
   g.fillStyle = grad;
   g.beginPath(); g.moveTo(0, 128);
-  g.bezierCurveTo(60, 15, 225, 10, 245, 78);
-  g.bezierCurveTo(250, 118, 170, 130, 145, 135);
-  g.bezierCurveTo(215, 165, 195, 245, 105, 240);
-  g.bezierCurveTo(45, 232, 12, 175, 0, 135);
-  g.closePath(); g.fill();
-  g.strokeStyle = "#111"; g.lineWidth = 5; g.stroke();
-  g.fillStyle = "rgba(255,255,255,0.85)";
-  for (let i = 0; i < 8; i++) { g.beginPath(); g.arc(195 - i * 8, 55 + i * 22, 4, 0, Math.PI * 2); g.fill(); }
+  g.bezierCurveTo(60, 15, 225, 10, 245, 78); g.bezierCurveTo(250, 118, 170, 130, 145, 135);
+  g.bezierCurveTo(215, 165, 195, 245, 105, 240); g.bezierCurveTo(45, 232, 12, 175, 0, 135); g.closePath(); g.fill();
+  g.strokeStyle = "#111"; g.lineWidth = 4; g.stroke();
   const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
 
-  const bRoot = new THREE.Group();
-  bRoot.position.copy(pos);
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x16161c, roughness: 0.45 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry ? new THREE.CapsuleGeometry(scale * 0.055, scale * 0.36, 6, 10) : new THREE.CylinderGeometry(scale * 0.05, scale * 0.04, scale * 0.42, 10), bodyMat);
+  const bRoot = new THREE.Group(); bRoot.position.copy(pos);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x15151a, roughness: 0.55 });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(scale * 0.04, scale * 0.032, scale * 0.42, 10), bodyMat);
   body.rotation.x = Math.PI / 2; bRoot.add(body);
-  for (const sd of [-1, 1]) {
-    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.002, 0.003, scale * 0.32, 6), bodyMat);
-    ant.position.set(sd * scale * 0.06, scale * 0.1, scale * 0.3); ant.rotation.set(0.7, 0, -sd * 0.3); bRoot.add(ant);
-  }
-  const wingMat = new THREE.MeshPhysicalMaterial({ map: tex, transparent: true, alphaTest: 0.1, roughness: 0.35, iridescence: 0.8, side: THREE.DoubleSide });
-  const wGeoR = new THREE.PlaneGeometry(scale, scale); wGeoR.rotateX(-Math.PI / 2); wGeoR.translate(scale * 0.5, 0, 0);
-  const wGeoL = new THREE.PlaneGeometry(scale, scale); wGeoL.rotateX(-Math.PI / 2); wGeoL.scale(-1, 1, 1); wGeoL.translate(-scale * 0.5, 0, 0);
-  const wingR = new THREE.Mesh(wGeoR, wingMat), wingL = new THREE.Mesh(wGeoL, wingMat);
+  const wingMat = new THREE.MeshPhysicalMaterial({ map: tex, transparent: true, alphaTest: 0.1, roughness: 0.3, iridescence: 0.85, side: THREE.DoubleSide });
+  const wingR = new THREE.Mesh(new THREE.PlaneGeometry(scale, scale).rotateX(-Math.PI / 2).translate(scale * 0.5, 0, 0), wingMat);
+  const wingL = new THREE.Mesh(new THREE.PlaneGeometry(scale, scale).rotateX(-Math.PI / 2).scale(-1, 1, 1).translate(-scale * 0.5, 0, 0), wingMat);
   bRoot.add(wingR, wingL);
   APP.scene.add(bRoot);
-  const bb = APP.computeBox(bRoot);
-  const mxU = APP.applyDissolveShader(bRoot, bb.min.y, bb.max.y, false);
-
-  let phase = Math.random() * 6.28, ang = Math.random() * 6.28, perched = false;
+  const bb = APP.computeBox(bRoot), mxU = APP.applyDissolveShader(bRoot, bb.min.y, bb.max.y, false);
+  let phase = 0, ang = Math.random() * 6.28, perched = false;
   const home = pos.clone(), vel = new THREE.Vector3();
   const ent = APP.registerEntity({
     name: "butterfly", type: "butterfly", root: bRoot, box: bb, matrixUniforms: mxU, buildDur: 0.7, grabbable: true,
     upd: (dt, t) => {
       if (ent.dissolveStart || ent.heldBy || dt <= 0) return;
-      // Check if user makes index pointing gesture (non-desk VR hand with tipWp extended or steady)
       let perchTarget = null;
       for (const h of APP.hands) {
-        if (h.isDesk || !h.model || !h.model.root.visible) continue;
-        const dist = h.tipWp.distanceTo(bRoot.position);
-        const speed = h.vel.length();
-        const isPointing = h.tipWp.distanceTo(h.wp) > 0.06 && !h.act;
-        if (isPointing && speed < 0.35 && dist < 2.2) { perchTarget = h.tipWp; break; }
+        if (!h.isDesk && h.isPointing && h.vel.length() < 0.35 && h.tipWp.distanceTo(bRoot.position) < 2.2) { perchTarget = h.tipWp; break; }
       }
-      if (perchTarget) {
-        const d = bRoot.position.distanceTo(perchTarget);
-        if (d < 0.045) {
-          perched = true;
-          bRoot.position.lerp(perchTarget.clone().add(new THREE.Vector3(0, 0.02, 0)), Math.min(1, dt * 12));
-          phase += dt * 3.2;
-          const flap = 0.25 + Math.sin(phase) * 0.22;
-          wingR.rotation.z = flap; wingL.rotation.z = -flap;
-          return;
-        } else {
-          perched = false;
-          const dir = perchTarget.clone().sub(bRoot.position).normalize();
-          vel.lerp(dir.multiplyScalar(0.75), dt * 4);
-          bRoot.position.addScaledVector(vel, dt);
-          bRoot.lookAt(bRoot.position.clone().add(vel));
-        }
-      } else {
-        perched = false;
-        ang += dt * (0.7 + Math.sin(t * 0.9) * 0.6);
-        const tx = home.x + Math.sin(ang) * 0.85 + Math.cos(t * 1.3) * 0.35;
-        const ty = Math.max(0.65, home.y + Math.sin(t * 1.7) * 0.3);
-        const tz = home.z + Math.cos(ang * 0.8) * 0.85;
-        const desired = new THREE.Vector3(tx, ty, tz).sub(bRoot.position).multiplyScalar(1.6);
-        vel.lerp(desired, dt * 2.5);
-        bRoot.position.addScaledVector(vel, dt);
-        if (vel.lengthSq() > 0.002) bRoot.lookAt(bRoot.position.clone().add(vel));
+      if (perchTarget && bRoot.position.distanceTo(perchTarget) < 0.045) {
+        perched = true;
+        bRoot.position.lerp(perchTarget.clone().add(new THREE.Vector3(0, 0.015, 0)), Math.min(1, dt * 12));
+        phase += dt * 3.0;
+        wingR.rotation.z = 0.25 + Math.sin(phase) * 0.2; wingL.rotation.z = -wingR.rotation.z;
+        return;
       }
-      phase += dt * (perched ? 3.0 : 18.0);
-      const flap = Math.sin(phase) * 0.95;
-      wingR.rotation.z = flap; wingL.rotation.z = -flap;
+      perched = false;
+      const target = perchTarget || new THREE.Vector3(home.x + Math.sin(ang += dt * 0.85) * 0.8, Math.max(0.7, home.y + Math.sin(t * 1.6) * 0.25), home.z + Math.cos(ang * 0.75) * 0.8);
+      vel.lerp(target.clone().sub(bRoot.position).multiplyScalar(1.6), dt * 3);
+      bRoot.position.addScaledVector(vel, dt);
+      if (vel.lengthSq() > 0.002) bRoot.lookAt(bRoot.position.clone().add(vel));
+      phase += dt * 18.0;
+      wingR.rotation.z = Math.sin(phase) * 0.9; wingL.rotation.z = -wingR.rotation.z;
     }
   });
   return ent;
 };
 
-// Smart geometric classifier for magic pen strokes
 const classifyStroke = (pts) => {
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(APP.camera.quaternion).setY(0).normalize();
   if (right.lengthSq() < 0.01) right.set(1, 0, 0);
@@ -377,12 +282,8 @@ const classifyStroke = (pts) => {
   const norm = proj.map(p => ({ x: (p.x - minX) / W, y: (p.y - minY) / H }));
   const closeDist = Math.hypot(norm[0].x - norm[norm.length - 1].x, norm[0].y - norm[norm.length - 1].y);
 
-  // Count center crossings & radial lobes
-  let centerCross = 0, topMidDip = 1, botMidMin = 1, topEdgeMax = 0;
-  let topLeftMax = 0, topRightMax = 0, midTopMin = 1;
-  const rVals = norm.map(p => Math.hypot(p.x - 0.5, p.y - 0.5));
-  const rMean = rVals.reduce((a, b) => a + b, 0) / rVals.length;
-  let radialPeaks = 0;
+  let centerCross = 0, topMidDip = 1, botMidMin = 1, topEdgeMax = 0, topLeftMax = 0, topRightMax = 0, midTopMin = 1, radialPeaks = 0;
+  const rVals = norm.map(p => Math.hypot(p.x - 0.5, p.y - 0.5)), rMean = rVals.reduce((a, b) => a + b, 0) / rVals.length;
   for (let i = 2; i < norm.length - 2; i++) {
     const p = norm[i];
     if (Math.abs(p.x - 0.5) < 0.1 && Math.abs(p.y - 0.5) < 0.25 && Math.sign(norm[i - 1].x - 0.5) !== Math.sign(norm[i + 1].x - 0.5)) centerCross++;
@@ -397,17 +298,11 @@ const classifyStroke = (pts) => {
   const topW = norm.filter(p => p.y > 0.6).reduce((a, p) => Math.max(a, Math.abs(p.x - 0.5)), 0);
   const botW = norm.filter(p => p.y < 0.35).reduce((a, p) => Math.max(a, Math.abs(p.x - 0.5)), 0);
 
-  // 1. Heart: wider at top, clear top-center cleft, pointed bottom
   if (topEdgeMax - topMidDip > 0.12 && topW > botW * 1.2 && botMidMin < 0.18 && closeDist < 0.45) return "heart";
-  // 2. Butterfly: multiple center crossings or symmetric wide figure-8
   if (centerCross >= 2 && aspect > 0.95 && radialPeaks >= 3) return "butterfly";
-  // 3. Flower: many radial petal peaks around center
   if (radialPeaks >= 4 && aspect > 0.65 && aspect < 1.55) return "flower";
-  // 4. Cat: two ear peaks on upper left/right with dip between them
   if (topLeftMax > 0.78 && topRightMax > 0.78 && midTopMin < Math.min(topLeftMax, topRightMax) - 0.12) return "cat";
-  // 5. House: single central roof peak + square/wide lower base
   if (topMidDip > 0.85 && botW > 0.32 && aspect > 0.65 && aspect < 1.5) return "house";
-  // 6. Fish: elongated horizontal body
   return "fish";
 };
 
@@ -428,22 +323,16 @@ APP.onTick("magic_pen_ai", 0, () => {
     if (captured.length >= 6) {
       const kind = classifyStroke(captured);
       if (kind !== "fish") {
-        // Replace auto-spawned fish with recognized shape
         setTimeout(() => {
           const recentFish = [...APP.entities].reverse().find(e => e.type === "fish" && !e.dissolveStart);
-          if (recentFish) {
-            APP.scene.remove(recentFish.root);
-            recentFish.dissolveStart = performance.now() / 1000 - 10;
-          }
+          if (recentFish) { APP.scene.remove(recentFish.root); recentFish.dissolveStart = performance.now() / 1000 - 10; }
           const box = new THREE.Box3().setFromPoints(captured);
           const center = box.getCenter(new THREE.Vector3());
           const sz = box.getSize(new THREE.Vector3()).length() * 0.55;
-          if (kind === "butterfly") APP._spawnButterfly(center, Math.max(0.18, Math.min(0.4, sz * 0.6)));
-          else createShape3D(kind, center, sz);
+          if (kind === "butterfly") APP._spawnButterfly(center, Math.max(0.16, Math.min(0.32, sz * 0.55)));
+          else spawnMagicShape(kind, center, sz);
           APP.say("✨ تحول الرسم إلى: " + kind);
         }, 40);
-      } else {
-        APP.say("🐟 تحول الرسم إلى سمكة!");
       }
     }
   }
@@ -452,12 +341,22 @@ APP.onTick("magic_pen_ai", 0, () => {
 @ability: freeze_ice
 @match: freeze | ice | جمده | جمد | ثلج
 @code:
+const THREE = APP.THREE;
+// If rain is currently active, freeze all raindrops into suspended 3D reflective mirror droplets!
+const rainEnt = APP.entities.find(e => e.type === "weather" && e.name === "rain" && !e.dissolveStart);
+if (rainEnt && rainEnt._freezeRain) {
+  rainEnt._freezeRain();
+  APP.sfx.play("magic");
+  APP.say("❄️ تجمدت قطرات المطر في الهواء بعكس كامل للمحيط!");
+  return;
+}
+
 const pickTarget = () => {
   const held = APP.entities.find(e => e.heldBy && !e.dissolveStart);
   if (held) return held;
   let best = null, bestD = 0.65;
   for (const e of APP.entities) {
-    if (e.dissolveStart || e.type === "forest" || e.type === "env") continue;
+    if (e.dissolveStart || e.type === "forest" || e.type === "env_360") continue;
     const b = APP.computeBox(e.root);
     for (const h of APP.hands) {
       if (h.isDesk) continue;
@@ -470,19 +369,106 @@ const pickTarget = () => {
 const ent = pickTarget();
 if (!ent) return;
 APP.sfx.play("magic");
-APP.modify({
-  target: ent.id,
-  color: "#9ee8ff",
-  emissive: "#1a6885",
-  rough: 0.05,
-  metal: 0.14,
-  opacity: 0.78,
-  freezeAnim: true,
-  particles: "frost"
+const env = APP.updateReflection(ent.root.position);
+ent.root.traverse(o => {
+  if (!o.isMesh) return;
+  o.material = new THREE.MeshPhysicalMaterial({
+    color: 0xa6ecff, emissive: 0x124e66, emissiveIntensity: 0.45,
+    envMap: env, envMapIntensity: 2.8, roughness: 0.04, metalness: 0.12,
+    clearcoat: 1.0, transparent: true, opacity: 0.8
+  });
+  o.userData._mxPatched = false;
 });
+if (ent.mixer) ent.mixer.timeScale = 0;
+ent.ambientFx = "frost";
 const b = APP.computeBox(ent.root);
-const c = b.getCenter(new APP.THREE.Vector3());
+const c = b.getCenter(new THREE.Vector3());
 APP.fx.groundPulse(c.x, c.z, 1.9, 0x9ee8ff);
+
+@ability: make_transparent
+@match: turn & invisible | invisible | transparent | اجعله شفاف | شفاف | زجاج
+@code:
+const THREE = APP.THREE;
+const pickTarget = () => {
+  const held = APP.entities.find(e => e.heldBy && !e.dissolveStart);
+  if (held) return held;
+  return APP.findEntities("last")[0];
+};
+const ent = pickTarget();
+if (!ent) return;
+APP.sfx.play("magic");
+
+// Capture live environment cubemap around the object so the glass reflects & refracts the real scene
+const b = APP.computeBox(ent.root);
+const center = b.getCenter(new THREE.Vector3());
+ent.root.visible = false;
+const envCube = APP.updateReflection(center);
+ent.root.visible = true;
+
+// Custom Refractive & Distorted Environmental Glass Shader
+const glassUniforms = { uEnv: { value: envCube }, uTime: { value: 0 } };
+const distortedGlassMat = new THREE.ShaderMaterial({
+  uniforms: glassUniforms,
+  transparent: true,
+  depthWrite: false,
+  side: THREE.FrontSide,
+  vertexShader: `
+    varying vec3 vNormalW;
+    varying vec3 vPosW;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vPosW = wp.xyz;
+      vNormalW = normalize(mat3(modelMatrix) * normal);
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform samplerCube uEnv;
+    uniform float uTime;
+    varying vec3 vNormalW;
+    varying vec3 vPosW;
+    void main() {
+      vec3 V = normalize(vPosW - cameraPosition);
+      // Subtle organic glass surface ripple distortion
+      vec3 ripple = vec3(
+        sin(vPosW.y * 18.0 + vPosW.x * 9.0 + uTime * 0.6),
+        cos(vPosW.z * 16.0 - vPosW.y * 11.0),
+        sin(vPosW.x * 17.0 + vPosW.z * 10.0)
+      ) * 0.065;
+      vec3 N = normalize(vNormalW + ripple);
+      float fresnel = pow(1.0 - max(0.0, dot(-V, N)), 3.2);
+
+      // Chromatic dispersion refraction + distorted environment reflection
+      vec3 refDir = reflect(V, N);
+      vec3 refrR = refract(V, N, 0.66);
+      vec3 refrG = refract(V, N, 0.675);
+      vec3 refrB = refract(V, N, 0.69);
+
+      vec3 reflCol = textureCube(uEnv, refDir).rgb;
+      vec3 refrCol = vec3(
+        textureCube(uEnv, refrR).r,
+        textureCube(uEnv, refrG).g,
+        textureCube(uEnv, refrB).b
+      );
+      vec3 col = mix(refrCol * 0.95 + vec3(0.04, 0.09, 0.11), reflCol * 1.25, clamp(fresnel * 1.15 + 0.14, 0.0, 1.0));
+      float alpha = clamp(0.24 + fresnel * 0.72, 0.22, 0.94);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+ent.root.traverse(o => {
+  if (!o.isMesh) return;
+  o.material = distortedGlassMat;
+  o.userData._mxPatched = true;
+});
+
+APP.onTick("glass_env_" + ent.id, 0, (dt, t) => {
+  if (!ent.root.parent || ent.dissolveStart) { APP.stopTick("glass_env_" + ent.id); return; }
+  glassUniforms.uTime.value = t;
+});
+APP.fx.spawnBox(b, "frost", 24);
+APP.say("🫧 تحول الجسم إلى زجاج عاكس ومشوِّه للمحيط");
 
 @ability: add_window_portal
 @match: window | نافذة | نافذه | اضف نافذة | اضف نافذه
@@ -505,12 +491,25 @@ if (!tex) {
   tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
 }
 
-const sp = APP.spawnPos(1.75, 0);
+// Find nearest scanned real wall! If not scanned yet, trigger scan & snap to calibrated wall plane
+await APP.requestRoomScan();
+const hit = APP.findNearestWall(APP.headPos, APP.headFwd);
 const root = new THREE.Group();
-root.position.set(sp.x, 1.38, sp.z);
-root.rotation.y = sp.ry;
 
-const W = 1.15, H = 1.15;
+if (hit) {
+  // Snap flush onto the real physical wall surface (+8mm offset to prevent z-fighting)
+  root.position.copy(hit.point).addScaledVector(hit.normal, 0.008);
+  const lookTarget = root.position.clone().add(hit.normal);
+  root.lookAt(lookTarget);
+  APP.say("🪟 تم تثبيت النافذة على الجدار الحقيقي");
+} else {
+  const sp = APP.spawnPos(2.4, 0);
+  root.position.set(sp.x, 1.4, sp.z);
+  root.rotation.y = sp.ry;
+  APP.say("⚠️ امسح الغرفة أولاً لتثبيت النافذة على جدار حقيقي (تم وضعها على الحاجز الافتراضي)");
+}
+
+const W = 1.12, H = 1.12;
 const portalMat = new THREE.ShaderMaterial({
   uniforms: { uTex: { value: tex } },
   side: THREE.DoubleSide,
@@ -527,26 +526,37 @@ const portalMat = new THREE.ShaderMaterial({
 const pane = new THREE.Mesh(new THREE.PlaneGeometry(W, H), portalMat);
 root.add(pane);
 
-const frameMat = new THREE.MeshPhysicalMaterial({ color: 0x3b2618, roughness: 0.35, clearcoat: 0.6 });
-const sillMat = new THREE.MeshPhysicalMaterial({ color: 0x523420, roughness: 0.3 });
+// Realistic architectural wood window frame & crossbars
+const frameMat = new THREE.MeshPhysicalMaterial({ color: 0x3b2416, roughness: 0.32, clearcoat: 0.5 });
+const sillMat  = new THREE.MeshPhysicalMaterial({ color: 0x523420, roughness: 0.28, clearcoat: 0.6 });
 [[0, H / 2 + 0.035, W + 0.14, 0.07], [0, -H / 2 - 0.035, W + 0.18, 0.08], [-W / 2 - 0.035, 0, 0.07, H], [W / 2 + 0.035, 0, 0.07, H]].forEach(([x, y, fw, fh]) => {
-  const b = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.09), y < 0 ? sillMat : frameMat);
-  b.position.set(x, y, 0); b.castShadow = true; root.add(b);
+  const b = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.08), y < 0 ? sillMat : frameMat);
+  b.position.set(x, y, 0.01); b.castShadow = true; root.add(b);
 });
-// Window crossbars
-const barV = new THREE.Mesh(new THREE.BoxGeometry(0.025, H, 0.03), frameMat); barV.position.z = 0.015; root.add(barV);
-const barH = new THREE.Mesh(new THREE.BoxGeometry(W, 0.025, 0.03), frameMat); barH.position.z = 0.015; root.add(barH);
+const barV = new THREE.Mesh(new THREE.BoxGeometry(0.022, H, 0.03), frameMat); barV.position.z = 0.015; root.add(barV);
+const barH = new THREE.Mesh(new THREE.BoxGeometry(W, 0.022, 0.03), frameMat); barH.position.z = 0.015; root.add(barH);
 
 APP.scene.add(root);
 const wb = APP.computeBox(root);
 const mxU = APP.applyDissolveShader(root, wb.min.y, wb.max.y, false);
-APP.registerEntity({ name: "window", type: "window", root, box: wb, matrixUniforms: mxU, buildDur: 1.0, grabbable: true });
+APP.registerEntity({ name: "wall window", type: "window", root, box: wb, matrixUniforms: mxU, buildDur: 0.9, grabbable: false });
+
+@ability: enter_matrix_world
+@match: enter & matrix | ادخل الماتريكس | الماتريكس | ماتريكس
+@code:
+APP.sfx.play("magic");
+// Remove any blocking 360 room/forest meshes
+for (const e of [...APP.entities]) {
+  if (e.type === "env_360" || e.type === "forest") APP.dissolve({ target: e.id, duration: 0.45 });
+}
+APP.setEnv("matrix_black");
+APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 6.0, 0x00ff66);
+APP.say("🟩 أهلاً بك في الماتريكس");
 
 @ability: passthrough_mode
 @match: passthrough | real & world | اظهر الواقع | الواقع
 @code:
 APP.sfx.play("magic");
-// Remove any 360 room/galaxy/underwater sky enclosures blocking passthrough
 for (const e of [...APP.entities]) {
   if (e.type === "env_360" || e.type === "forest") APP.dissolve({ target: e.id, duration: 0.45 });
 }
@@ -555,7 +565,9 @@ const sess = APP.renderer.xr.getSession();
 if (sess && sess.environmentBlendMode === "opaque" && navigator.xr) {
   await sess.end();
   try {
-    const arSess = await navigator.xr.requestSession("immersive-ar", { optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking"] });
+    const arSess = await navigator.xr.requestSession("immersive-ar", {
+      optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking", "plane-detection", "mesh-detection", "light-estimation"]
+    });
     APP.renderer.xr.setReferenceSpaceType("local-floor");
     await APP.renderer.xr.setSession(arSess);
   } catch {}
@@ -563,107 +575,113 @@ if (sess && sess.environmentBlendMode === "opaque" && navigator.xr) {
 APP.renderer.setClearAlpha(0);
 APP.scene.background = null;
 APP.scene.fog = null;
-APP.say("👁 تم إظهار العالم الحقيقي (Passthrough)");
+APP.say("👁 تم إظهار الواقع الحقيقي (Passthrough)");
 
 @ability: spawn_piano
 @match: create & piano | piano | اصنع بيانو | بيانو
 @code:
 const THREE = APP.THREE;
 APP.sfx.play("build");
-const sp = APP.spawnPos(1.55, 0);
+const sp = APP.spawnPos(1.25, 0);
 const root = new THREE.Group();
 root.position.set(sp.x, 0, sp.z);
 root.rotation.y = sp.ry;
 
-const ebony = new THREE.MeshPhysicalMaterial({ color: 0x0b0c0e, roughness: 0.08, metalness: 0.15, clearcoat: 1.0, clearcoatRoughness: 0.05 });
-const brass = new THREE.MeshPhysicalMaterial({ color: 0xd9a845, metalness: 0.92, roughness: 0.18 });
-const whiteKeyMat = new THREE.MeshPhysicalMaterial({ color: 0xf7f5ef, roughness: 0.18, clearcoat: 0.6 });
-const blackKeyMat = new THREE.MeshPhysicalMaterial({ color: 0x121316, roughness: 0.25, clearcoat: 0.4 });
+const ebony = new THREE.MeshPhysicalMaterial({ color: 0x090a0c, roughness: 0.06, metalness: 0.12, clearcoat: 1.0, clearcoatRoughness: 0.04 });
+const brass = new THREE.MeshPhysicalMaterial({ color: 0xd9a845, metalness: 0.94, roughness: 0.16 });
+const feltRed = new THREE.MeshStandardMaterial({ color: 0x6e0d14, roughness: 0.92 });
+const whiteKeyMat = new THREE.MeshPhysicalMaterial({ color: 0xf7f5ef, roughness: 0.16, clearcoat: 0.7 });
+const blackKeyMat = new THREE.MeshPhysicalMaterial({ color: 0x101114, roughness: 0.24, clearcoat: 0.4 });
 
-// Curved Grand Piano Case
+// Real-scale Grand Piano case (~1.42m wide keyboard cabinet)
 const bodyShape = new THREE.Shape();
-bodyShape.moveTo(-0.72, 0.35);
-bodyShape.lineTo(0.72, 0.35);
-bodyShape.lineTo(0.72, -0.35);
-bodyShape.bezierCurveTo(0.72, -1.05, 0.15, -1.25, -0.15, -1.52);
-bodyShape.bezierCurveTo(-0.55, -1.75, -0.72, -1.25, -0.72, -0.75);
+bodyShape.moveTo(-0.71, 0.22);
+bodyShape.lineTo(0.71, 0.22);
+bodyShape.lineTo(0.71, -0.35);
+bodyShape.bezierCurveTo(0.71, -1.05, 0.14, -1.25, -0.15, -1.52);
+bodyShape.bezierCurveTo(-0.54, -1.74, -0.71, -1.25, -0.71, -0.75);
 bodyShape.closePath();
 
-const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, { depth: 0.28, bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.015, bevelSegments: 3 });
+const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, { depth: 0.24, bevelEnabled: true, bevelThickness: 0.012, bevelSize: 0.012, bevelSegments: 3 });
 bodyGeo.rotateX(Math.PI / 2);
 const bodyMesh = new THREE.Mesh(bodyGeo, ebony);
-bodyMesh.position.y = 0.98;
-bodyMesh.castShadow = bodyMesh.receiveShadow = true;
-root.add(bodyMesh);
+bodyMesh.position.y = 0.95; bodyMesh.castShadow = bodyMesh.receiveShadow = true; root.add(bodyMesh);
 
-// Open Propped Lid & Gold Harp Frame
-const lid = new THREE.Mesh(new THREE.ExtrudeGeometry(bodyShape, { depth: 0.02, bevelEnabled: false }).rotateX(Math.PI / 2), ebony);
-lid.position.set(0, 1.0, 0);
-lid.rotation.z = 0.46;
-lid.position.x = -0.32; lid.position.y = 1.24;
-lid.castShadow = true; root.add(lid);
+// Keybed shelf at realistic 0.71m height
+const keybed = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.045, 0.34), ebony);
+keybed.position.set(0, 0.71, 0.28); keybed.castShadow = true; root.add(keybed);
+const feltStrip = new THREE.Mesh(new THREE.BoxGeometry(1.24, 0.012, 0.015), feltRed);
+feltStrip.position.set(0, 0.752, 0.225); root.add(feltStrip);
 
-const prop = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.72, 8), brass);
-prop.position.set(0.45, 1.28, -0.45); prop.rotation.z = -0.18; root.add(prop);
-
+// Propped Lid + Gold Harp + Strings
+const lid = new THREE.Mesh(new THREE.ExtrudeGeometry(bodyShape, { depth: 0.018, bevelEnabled: false }).rotateX(Math.PI / 2), ebony);
+lid.position.set(-0.31, 1.2, 0); lid.rotation.z = 0.44; lid.castShadow = true; root.add(lid);
+const prop = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.72, 8), brass);
+prop.position.set(0.45, 1.25, -0.45); prop.rotation.z = -0.18; root.add(prop);
 const harp = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.2).rotateX(-Math.PI / 2), brass);
-harp.position.set(0, 0.99, -0.45); root.add(harp);
+harp.position.set(0, 0.955, -0.45); root.add(harp);
 
-// 3 Legs + Pedal Lyre
-[[-0.62, 0.24], [0.62, 0.24], [-0.4, -1.2]].forEach(([lx, lz]) => {
-  const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.028, 0.71, 12), ebony);
-  leg.position.set(lx, 0.355, lz); leg.castShadow = true; root.add(leg);
-  const caster = new THREE.Mesh(new THREE.SphereGeometry(0.028, 8, 8), brass);
-  caster.position.set(lx, 0.028, lz); root.add(caster);
+// 3 Legs & Pedal Lyre
+[[-0.62, 0.18], [0.62, 0.18], [-0.4, -1.2]].forEach(([lx, lz]) => {
+  const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.025, 0.69, 12), ebony);
+  leg.position.set(lx, 0.345, lz); leg.castShadow = true; root.add(leg);
+  const caster = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 8), brass);
+  caster.position.set(lx, 0.025, lz); root.add(caster);
 });
-const lyre = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.68, 0.05), ebony);
-lyre.position.set(0, 0.34, 0.05); root.add(lyre);
-[-0.06, 0, 0.06].forEach(px => {
-  const pd = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.02, 0.12), brass);
-  pd.position.set(px, 0.04, 0.1); root.add(pd);
+const lyre = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.67, 0.045), ebony);
+lyre.position.set(0, 0.335, 0.04); root.add(lyre);
+[-0.055, 0, 0.055].forEach(px => {
+  const pd = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.018, 0.11), brass);
+  pd.position.set(px, 0.035, 0.09); root.add(pd);
 });
 
-// Interactive 24 Keys (2 Octaves C4 -> B5)
+// Realistic Life-Size 52 Piano Keys (30 White keys x 2.35cm + 22 Black keys x 1.35cm)
 const keys = [];
-const whiteMidi = [60,62,64,65,67,69,71, 72,74,76,77,79,81,83];
-const blackSlots = [0,1,3,4,5, 7,8,10,11,12];
-const blackMidi  = [61,63,66,68,70, 73,75,78,80,82];
-const startX = -0.58, kw = 0.088;
-
 const playPianoNote = (midi) => {
   const ctx = APP.sfx.ctx; if (!ctx) return;
   const freq = 440 * Math.pow(2, (midi - 69) / 12);
   const t = ctx.currentTime;
   const master = ctx.createGain();
   master.gain.setValueAtTime(0.001, t);
-  master.gain.linearRampToValueAtTime(0.22, t + 0.012);
-  master.gain.exponentialRampToValueAtTime(0.035, t + 0.45);
-  master.gain.exponentialRampToValueAtTime(0.0008, t + 1.85);
+  master.gain.linearRampToValueAtTime(0.22, t + 0.01);
+  master.gain.exponentialRampToValueAtTime(0.035, t + 0.48);
+  master.gain.exponentialRampToValueAtTime(0.0008, t + 1.9);
   master.connect(ctx.destination);
   [1, 2, 3, 4].forEach((h, idx) => {
-    const osc = ctx.createOscillator();
-    const hg = ctx.createGain();
+    const osc = ctx.createOscillator(), hg = ctx.createGain();
     osc.type = idx === 0 ? "triangle" : "sine";
     osc.frequency.setValueAtTime(freq * h, t);
-    hg.gain.value = [0.65, 0.25, 0.1, 0.04][idx];
-    osc.connect(hg).connect(master);
-    osc.start(t); osc.stop(t + 1.9);
+    hg.gain.value = [0.65, 0.24, 0.1, 0.04][idx];
+    osc.connect(hg).connect(master); osc.start(t); osc.stop(t + 1.95);
   });
 };
 
-whiteMidi.forEach((midi, i) => {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(kw * 0.9, 0.035, 0.26), whiteKeyMat.clone());
-  m.position.set(startX + i * kw, 0.77, 0.44);
-  root.add(m);
-  keys.push({ mesh: m, baseY: 0.77, midi, pressed: false, pressT: 0 });
-});
-blackMidi.forEach((midi, i) => {
-  const slot = blackSlots[i];
-  const m = new THREE.Mesh(new THREE.BoxGeometry(kw * 0.56, 0.042, 0.16), blackKeyMat.clone());
-  m.position.set(startX + (slot + 0.5) * kw, 0.795, 0.39);
-  root.add(m);
-  keys.push({ mesh: m, baseY: 0.795, midi, pressed: false, pressT: 0 });
-});
+// Build 52 keys from C2 (MIDI 36) to E6 (MIDI 88)
+const whitePitchStep = 0.0238; // real 23.8 mm key spacing!
+const whiteW = 0.0226, whiteL = 0.148, whiteH = 0.022;
+const blackW = 0.0132, blackL = 0.094, blackH = 0.015;
+const isBlack = [false, true, false, true, false, false, true, false, true, false, true, false];
+let wCount = 0;
+for (let m = 36; m <= 87; m++) if (!isBlack[m % 12]) wCount++;
+const totalKeyW = wCount * whitePitchStep;
+let wi = 0;
+for (let m = 36; m <= 87; m++) {
+  const pc = m % 12;
+  if (!isBlack[pc]) {
+    const x = -totalKeyW * 0.5 + (wi + 0.5) * whitePitchStep;
+    const km = new THREE.Mesh(new THREE.BoxGeometry(whiteW, whiteH, whiteL), whiteKeyMat.clone());
+    km.position.set(x, 0.742, 0.305);
+    root.add(km);
+    keys.push({ mesh: km, baseY: 0.742, midi: m, isBlack: false, pressed: false, pressT: 0 });
+    wi++;
+  } else {
+    const x = -totalKeyW * 0.5 + wi * whitePitchStep;
+    const km = new THREE.Mesh(new THREE.BoxGeometry(blackW, blackH, blackL), blackKeyMat.clone());
+    km.position.set(x, 0.758, 0.275);
+    root.add(km);
+    keys.push({ mesh: km, baseY: 0.758, midi: m, isBlack: true, pressed: false, pressT: 0 });
+  }
+}
 
 APP.scene.add(root);
 const pb = APP.computeBox(root);
@@ -679,27 +697,31 @@ const onDesktopClick = (ev) => {
   const hits = raycaster.intersectObjects(keys.map(k => k.mesh), false);
   if (hits.length) {
     const k = keys.find(item => item.mesh === hits[0].object);
-    if (k) { k.pressT = 0.22; playPianoNote(k.midi); }
+    if (k) { k.pressT = 0.2; playPianoNote(k.midi); }
   }
 };
 APP.renderer.domElement.addEventListener("pointerdown", onDesktopClick);
 
 APP.registerEntity({
-  name: "grand piano", type: "piano", root, box: pb, matrixUniforms: mxU, buildDur: 2.2,
+  name: "grand piano", type: "piano", root, box: pb, matrixUniforms: mxU, buildDur: 2.0,
   upd: (dt) => {
     for (const k of keys) {
       k.mesh.getWorldPosition(kwPos);
       let hit = false;
       for (const h of APP.hands) {
         if (h.isDesk) continue;
-        if (h.tipWp.distanceTo(kwPos) < 0.068 || h.wp.distanceTo(kwPos) < 0.085) { hit = true; break; }
+        const pts = h.handTrackingActive ? h.fingerTips : [h.tipWp];
+        for (const p of pts) {
+          if (Math.abs(p.x - kwPos.x) < 0.013 && Math.abs(p.z - kwPos.z) < 0.065 && Math.abs(p.y - kwPos.y) < 0.026) { hit = true; break; }
+        }
+        if (hit) break;
       }
-      if (hit && !k.pressed) { k.pressed = true; k.pressT = 0.18; playPianoNote(k.midi); }
+      if (hit && !k.pressed) { k.pressed = true; k.pressT = 0.16; playPianoNote(k.midi); }
       else if (!hit) k.pressed = false;
       if (k.pressT > 0) k.pressT = Math.max(0, k.pressT - dt);
-      const down = (k.pressed || k.pressT > 0) ? 0.018 : 0;
-      k.mesh.position.y += ((k.baseY - down) - k.mesh.position.y) * Math.min(1, dt * 24);
-      k.mesh.material.emissive.setHex((k.pressed || k.pressT > 0) ? 0x165566 : 0x000000);
+      const down = (k.pressed || k.pressT > 0) ? 0.011 : 0;
+      k.mesh.position.y += ((k.baseY - down) - k.mesh.position.y) * Math.min(1, dt * 28);
+      k.mesh.material.emissive.setHex((k.pressed || k.pressT > 0) ? 0x164a5c : 0x000000);
     }
   },
   dispose: () => APP.renderer.domElement.removeEventListener("pointerdown", onDesktopClick)
@@ -734,17 +756,14 @@ root.rotation.y = sp.ry;
 
 const portalUniforms = { uTex: { value: tex }, uTime: { value: 0 }, uOpen: { value: 0 } };
 const portalMat = new THREE.ShaderMaterial({
-  uniforms: portalUniforms,
-  transparent: true,
-  side: THREE.DoubleSide,
+  uniforms: portalUniforms, transparent: true, side: THREE.DoubleSide,
   vertexShader: `
     uniform float uTime; uniform float uOpen;
     varying vec3 vW; varying vec2 vUv;
     void main(){
       vUv = uv;
       vec3 p = position;
-      float r = length(p.xy);
-      float a = atan(p.y, p.x);
+      float r = length(p.xy), a = atan(p.y, p.x);
       float wave = sin(a * 5.0 + uTime * 3.2) * 0.065 + cos(a * 3.0 - uTime * 2.4) * 0.05;
       p.xy *= (1.0 + wave * smoothstep(0.2, 1.0, r)) * uOpen;
       p.z += sin(r * 6.0 - uTime * 4.0) * 0.035;
@@ -756,8 +775,7 @@ const portalMat = new THREE.ShaderMaterial({
     uniform sampler2D uTex; uniform float uTime; varying vec3 vW; varying vec2 vUv;
     void main(){
       vec2 c = vUv * 2.0 - 1.0;
-      float r = length(c);
-      float a = atan(c.y, c.x);
+      float r = length(c), a = atan(c.y, c.x);
       float edgeWave = 0.90 + 0.06 * sin(a * 6.0 + uTime * 4.0) + 0.04 * cos(a * 4.0 - uTime * 3.0);
       if (r > edgeWave) discard;
       vec3 d = normalize(vW - cameraPosition);
@@ -770,28 +788,14 @@ const portalMat = new THREE.ShaderMaterial({
       gl_FragColor = vec4(mix(worldCol, rimCol * 2.1, rim), 1.0 - smoothstep(edgeWave - 0.03, edgeWave, r));
     }`
 });
-const disc = new THREE.Mesh(new THREE.CircleGeometry(1.18, 64), portalMat);
-root.add(disc);
-
+root.add(new THREE.Mesh(new THREE.CircleGeometry(1.18, 64), portalMat));
 const pLight = new THREE.PointLight(0x66ccff, 2.2, 7.0);
-pLight.position.set(0, 0, 0.35);
-root.add(pLight);
-
-// Deep whoosh dimensional opening SFX
-const ctx = APP.sfx.ctx;
-if (ctx) {
-  const t = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
-  o.type = "sawtooth"; o.frequency.setValueAtTime(55, t); o.frequency.exponentialRampToValueAtTime(220, t + 1.1);
-  const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.setValueAtTime(160, t); lp.frequency.exponentialRampToValueAtTime(1600, t + 1.1);
-  g.gain.setValueAtTime(0.001, t); g.gain.linearRampToValueAtTime(0.14, t + 0.35); g.gain.exponentialRampToValueAtTime(0.001, t + 1.3);
-  o.connect(lp).connect(g).connect(ctx.destination); o.start(t); o.stop(t + 1.35);
-}
+pLight.position.set(0, 0, 0.35); root.add(pLight);
 
 APP.scene.add(root);
-APP.fx.groundPulse(sp.x, 0, 2.5, 0x44ccff);
-const pb = APP.computeBox(root);
+APP.fx.groundPulse(sp.x, sp.z, 2.5, 0x44ccff);
 const ent = APP.registerEntity({
-  name: "dimensional portal", type: "portal", root, box: pb, buildDur: 0.1,
+  name: "dimensional portal", type: "portal", root, box: APP.computeBox(root), buildDur: 0.1,
   upd: (dt, t) => {
     portalUniforms.uTime.value = t;
     portalUniforms.uOpen.value = Math.min(1, portalUniforms.uOpen.value + dt * 1.1);
@@ -804,6 +808,132 @@ const ent = APP.registerEntity({
   }
 });
 
+@ability: spawn_front_door_world2
+@match: open & front & door | front & door | افتح باب امامي | باب امامي
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+const sp = APP.spawnPos(1.85, 0);
+const root = new THREE.Group();
+root.position.set(sp.x, 0, sp.z);
+root.rotation.y = sp.ry;
+
+const doorW = 0.96, doorH = 2.12, frameT = 0.09;
+const woodTex = (() => {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 512;
+  const g = c.getContext("2d");
+  g.fillStyle = "#4d2f1c"; g.fillRect(0, 0, 256, 512);
+  for (let i = 0; i < 160; i++) {
+    g.fillStyle = i % 2 === 0 ? "rgba(35,18,8,0.22)" : "rgba(110,70,40,0.16)";
+    g.fillRect(Math.random() * 256, 0, 2 + Math.random() * 6, 512);
+  }
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+})();
+const oakMat = new THREE.MeshPhysicalMaterial({ map: woodTex, roughness: 0.36, clearcoat: 0.35 });
+const brassMat = new THREE.MeshPhysicalMaterial({ color: 0xd9aa44, metalness: 0.94, roughness: 0.16 });
+
+// Architectural Door Frame
+const leftPost = new THREE.Mesh(new THREE.BoxGeometry(frameT, doorH + frameT, 0.14), oakMat);
+leftPost.position.set(-doorW / 2 - frameT / 2, (doorH + frameT) / 2, 0); leftPost.castShadow = true; root.add(leftPost);
+const rightPost = new THREE.Mesh(new THREE.BoxGeometry(frameT, doorH + frameT, 0.14), oakMat);
+rightPost.position.set(doorW / 2 + frameT / 2, (doorH + frameT) / 2, 0); rightPost.castShadow = true; root.add(rightPost);
+const header = new THREE.Mesh(new THREE.BoxGeometry(doorW + frameT * 2, frameT, 0.14), oakMat);
+header.position.set(0, doorH + frameT / 2, 0); header.castShadow = true; root.add(header);
+
+// Stencil Portal Mask inside the Doorway (stencil ref = 1)
+const portalMask = new THREE.Mesh(
+  new THREE.PlaneGeometry(doorW, doorH),
+  new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp })
+);
+portalMask.position.set(0, doorH / 2, -0.02);
+portalMask.renderOrder = 1;
+root.add(portalMask);
+
+// Load world2.glb behind the doorway and stencil-clip it so it is ONLY visible inside the open door!
+const worldGroup = new THREE.Group();
+worldGroup.position.set(0, 0, -0.05);
+root.add(worldGroup);
+
+let world2Loaded = null;
+try {
+  world2Loaded = await new Promise((res, rej) => APP.gltfLoader.load(APP.findGLB("world2.glb"), res, undefined, rej));
+} catch {
+  try { world2Loaded = await new Promise((res, rej) => APP.gltfLoader.load("./models/world2.glb", res, undefined, rej)); }
+  catch {}
+}
+
+if (world2Loaded) {
+  const wm = APP.SkeletonUtils.clone(world2Loaded.scene);
+  const wb = APP.computeBox(wm), sz = wb.getSize(new THREE.Vector3());
+  const sc = 8.0 / Math.max(sz.x, sz.z, 0.1);
+  wm.scale.setScalar(sc);
+  const sb = APP.computeBox(wm), c = sb.getCenter(new THREE.Vector3());
+  wm.position.set(-c.x, -sb.min.y, -sb.max.z - 0.15);
+  wm.traverse(o => {
+    if (!o.isMesh) return;
+    o.renderOrder = 2;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => { m.stencilWrite = true; m.stencilRef = 1; m.stencilFunc = THREE.EqualStencilFunc; });
+  });
+  worldGroup.add(wm);
+} else {
+  // Clean 3D architectural world2 interior room fallback if world2.glb not yet imported
+  const skyDome = new THREE.Mesh(
+    new THREE.SphereGeometry(12, 32, 24),
+    new THREE.MeshBasicMaterial({ color: 0x6ba6d9, side: THREE.BackSide, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc })
+  );
+  skyDome.renderOrder = 2;
+  const gFloor = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20).rotateX(-Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x3b6340, roughness: 0.85, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc })
+  );
+  gFloor.position.set(0, 0.01, -10); gFloor.renderOrder = 2;
+  worldGroup.add(skyDome, gFloor);
+  APP.say("⚠️ استورد world2.glb في شريط الاستيراد ليظهر داخل الباب");
+}
+
+// Hinged Swinging Oak Door Leaf
+const hingePivot = new THREE.Group();
+hingePivot.position.set(-doorW / 2, 0, 0.01);
+root.add(hingePivot);
+
+const doorLeaf = new THREE.Mesh(new THREE.BoxGeometry(doorW, doorH, 0.055), oakMat);
+doorLeaf.position.set(doorW / 2, doorH / 2, 0);
+doorLeaf.castShadow = doorLeaf.receiveShadow = true;
+hingePivot.add(doorLeaf);
+
+// Raised architectural door panels & brass handle
+const panelMat = new THREE.MeshPhysicalMaterial({ map: woodTex, color: 0x3d2415, roughness: 0.4 });
+[0.52, 1.48].forEach(py => {
+  const pnl = new THREE.Mesh(new THREE.BoxGeometry(doorW * 0.68, 0.66, 0.072), panelMat);
+  pnl.position.set(doorW / 2, py, 0); hingePivot.add(pnl);
+});
+const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.12, 10), brassMat);
+handle.rotation.z = Math.PI / 2; handle.position.set(doorW - 0.1, 1.0, 0.055); hingePivot.add(handle);
+
+// Door creak/open SFX
+const ctx = APP.sfx.ctx;
+if (ctx) {
+  const t = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "triangle"; o.frequency.setValueAtTime(160, t); o.frequency.linearRampToValueAtTime(115, t + 0.9);
+  g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+  o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 1.05);
+}
+
+APP.scene.add(root);
+APP.fx.groundPulse(sp.x, sp.z, 1.8, 0x00ff88);
+let openProg = 0;
+APP.registerEntity({
+  name: "front door", type: "door", root, box: APP.computeBox(root), buildDur: 0.9,
+  upd: (dt) => {
+    if (openProg < 1) {
+      openProg = Math.min(1, openProg + dt * 0.65);
+      // Smoothly swing door inward away from user
+      hingePivot.rotation.y = -(1 - Math.pow(1 - openProg, 3)) * 1.65;
+    }
+  }
+});
+
 @ability: spawn_butterfly
 @match: create & butterfly | butterfly | اصنع فراشة | اصنع فراشه | فراشة | فراشه
 @code:
@@ -811,848 +941,30 @@ APP.sfx.play("magic");
 const sp = APP.spawnPos(1.35, 0);
 const pos = new APP.THREE.Vector3(sp.x, 1.38, sp.z);
 if (APP._spawnButterfly) {
-  APP._spawnButterfly(pos, 0.28);
+  APP._spawnButterfly(pos, 0.22);
 } else {
-  const c = document.createElement("canvas"); c.width = 256; c.height = 256;
-  const g = c.getContext("2d");
+  const THREE = APP.THREE;
+  const c = document.createElement("canvas"); c.width = 256; c.height = 256; const g = c.getContext("2d");
   const grad = g.createRadialGradient(40, 128, 10, 140, 128, 180);
-  grad.addColorStop(0, "#fff078"); grad.addColorStop(0.3, "#ff7b1c"); grad.addColorStop(0.7, "#00d4ff"); grad.addColorStop(1, "#111018");
+  grad.addColorStop(0, "#ffe47a"); grad.addColorStop(0.28, "#eb6b15"); grad.addColorStop(0.68, "#1895c7"); grad.addColorStop(1, "#101014");
   g.fillStyle = grad;
-  g.beginPath(); g.moveTo(0, 128);
-  g.bezierCurveTo(60, 15, 225, 10, 245, 78); g.bezierCurveTo(250, 118, 170, 130, 145, 135);
+  g.beginPath(); g.moveTo(0, 128); g.bezierCurveTo(60, 15, 225, 10, 245, 78); g.bezierCurveTo(250, 118, 170, 130, 145, 135);
   g.bezierCurveTo(215, 165, 195, 245, 105, 240); g.bezierCurveTo(45, 232, 12, 175, 0, 135); g.closePath(); g.fill();
-  const tex = new APP.THREE.CanvasTexture(c); tex.encoding = APP.THREE.sRGBEncoding;
-  const bRoot = new APP.THREE.Group(); bRoot.position.copy(pos);
-  const wMat = new APP.THREE.MeshPhysicalMaterial({ map: tex, transparent: true, alphaTest: 0.1, side: APP.THREE.DoubleSide });
-  const wR = new APP.THREE.Mesh(new APP.THREE.PlaneGeometry(0.26, 0.26).rotateX(-Math.PI / 2).translate(0.13, 0, 0), wMat);
-  const wL = new APP.THREE.Mesh(new APP.THREE.PlaneGeometry(0.26, 0.26).rotateX(-Math.PI / 2).scale(-1, 1, 1).translate(-0.13, 0, 0), wMat);
+  const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
+  const bRoot = new THREE.Group(); bRoot.position.copy(pos);
+  const wMat = new THREE.MeshPhysicalMaterial({ map: tex, transparent: true, alphaTest: 0.1, side: THREE.DoubleSide });
+  const wR = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22).rotateX(-Math.PI / 2).translate(0.11, 0, 0), wMat);
+  const wL = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22).rotateX(-Math.PI / 2).scale(-1, 1, 1).translate(-0.11, 0, 0), wMat);
   bRoot.add(wR, wL); APP.scene.add(bRoot);
-  let ph = 0, ag = 0; const home = pos.clone(), vel = new APP.THREE.Vector3();
+  let ph = 0, ag = 0; const home = pos.clone(), vel = new THREE.Vector3();
   APP.registerEntity({
     name: "butterfly", type: "butterfly", root: bRoot, box: APP.computeBox(bRoot), buildDur: 0.5, grabbable: true,
     upd: (dt, t) => {
       if (dt <= 0) return;
       let perch = null;
-      for (const h of APP.hands) {
-        if (!h.isDesk && h.model && h.model.root.visible && !h.act && h.vel.length() < 0.35 && h.tipWp.distanceTo(bRoot.position) < 2.2) { perch = h.tipWp; break; }
-      }
+      for (const h of APP.hands) if (!h.isDesk && h.isPointing && h.vel.length() < 0.35 && h.tipWp.distanceTo(bRoot.position) < 2.2) { perch = h.tipWp; break; }
       if (perch && bRoot.position.distanceTo(perch) < 0.05) {
-        bRoot.position.lerp(perch.clone().add(new APP.THREE.Vector3(0, 0.02, 0)), dt * 10);
-        ph += dt * 3;
+        bRoot.position.lerp(perch.clone().add(new THREE.Vector3(0, 0.015, 0)), dt * 10); ph += dt * 3;
       } else {
-        const tg = perch || new APP.THREE.Vector3(home.x + Math.sin(ag += dt * 0.9) * 0.85, home.y + Math.sin(t * 2) * 0.25, home.z + Math.cos(ag * 0.7) * 0.85);
+        const tg = perch || new THREE.Vector3(home.x + Math.sin(ag += dt * 0.9) * 0.85, home.y + Math.sin(t * 2) * 0.25, home.z + Math.cos(ag * 0.7) * 0.85);
         vel.lerp(tg.clone().sub(bRoot.position).multiplyScalar(1.6), dt * 3);
-        bRoot.position.addScaledVector(vel, dt);
-        if (vel.lengthSq() > 0.002) bRoot.lookAt(bRoot.position.clone().add(vel));
-        ph += dt * 18;
-      }
-      wR.rotation.z = Math.sin(ph) * 0.9; wL.rotation.z = -wR.rotation.z;
-    }
-  });
-}
-
-@ability: make_rain
-@match: make & rain | rain | اجعلها تمطر | تمطر | مطر
-@code:
-const THREE = APP.THREE;
-const root = new THREE.Group();
-const COUNT = 1400;
-const positions = new Float32Array(COUNT * 6);
-const drops = [];
-for (let i = 0; i < COUNT; i++) {
-  const x = APP.headPos.x + (Math.random() - 0.5) * 14;
-  const y = Math.random() * 8;
-  const z = APP.headPos.z + (Math.random() - 0.5) * 14;
-  const spd = 7.5 + Math.random() * 4.5;
-  drops.push({ x, y, z, spd, len: 0.22 + Math.random() * 0.16 });
-}
-const rGeo = new THREE.BufferGeometry();
-rGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-const rMat = new THREE.LineBasicMaterial({ color: 0xbfe6ff, transparent: true, opacity: 0.52 });
-const rainLines = new THREE.LineSegments(rGeo, rMat);
-rainLines.frustumCulled = false;
-root.add(rainLines);
-
-// Splash rings on ground
-const splashes = Array.from({ length: 45 }, () => {
-  const m = new THREE.Mesh(
-    new THREE.RingGeometry(0.02, 0.035, 16).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0xd8f3ff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false })
-  );
-  m.visible = false; root.add(m);
-  return { m, t: 1 };
-});
-
-// Make surfaces wet & glossy
-for (const e of APP.entities) {
-  if (!e.dissolveStart) APP.modify({ target: e.id, rough: 0.12 });
-}
-
-// Procedural soothing rain noise via Web Audio
-const ctx = APP.sfx.ctx;
-let rainSrc = null;
-if (ctx) {
-  const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  rainSrc = ctx.createBufferSource(); rainSrc.buffer = buf; rainSrc.loop = true;
-  const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 1800; bp.Q.value = 0.55;
-  const gn = ctx.createGain(); gn.gain.value = 0.09;
-  rainSrc.connect(bp).connect(gn).connect(ctx.destination);
-  rainSrc.start();
-}
-
-APP.scene.add(root);
-APP.registerEntity({
-  name: "rain", type: "weather", root, box: new THREE.Box3(new THREE.Vector3(-7,0,-7), new THREE.Vector3(7,8,7)), buildDur: 0.2,
-  upd: (dt) => {
-    const attr = rGeo.attributes.position.array;
-    const windShift = APP.worldWind * 0.25;
-    for (let i = 0; i < COUNT; i++) {
-      const dr = drops[i];
-      dr.y -= dr.spd * dt;
-      dr.x += windShift * dt;
-      if (dr.y <= 0.02) {
-        if (Math.random() < 0.08) {
-          const sp = splashes.find(s => s.t >= 1);
-          if (sp) { sp.t = 0; sp.m.position.set(dr.x, 0.015, dr.z); sp.m.visible = true; }
-        }
-        dr.x = APP.headPos.x + (Math.random() - 0.5) * 14;
-        dr.y = 7.5 + Math.random() * 1.5;
-        dr.z = APP.headPos.z + (Math.random() - 0.5) * 14;
-      }
-      const k = i * 6;
-      attr[k] = dr.x; attr[k + 1] = dr.y; attr[k + 2] = dr.z;
-      attr[k + 3] = dr.x - windShift * 0.02; attr[k + 4] = dr.y + dr.len; attr[k + 5] = dr.z;
-    }
-    rGeo.attributes.position.needsUpdate = true;
-    for (const sp of splashes) {
-      if (sp.t >= 1) continue;
-      sp.t += dt * 3.2;
-      if (sp.t >= 1) { sp.m.visible = false; continue; }
-      sp.m.scale.setScalar(1 + sp.t * 3.2);
-      sp.m.material.opacity = (1 - sp.t) * 0.65;
-    }
-  },
-  dispose: () => { if (rainSrc) try { rainSrc.stop(); } catch {} }
-});
-
-@ability: spawn_tornado
-@match: create & tornado | tornado | اصنع اعصار | اعصار
-@code:
-const THREE = APP.THREE;
-const sp = APP.spawnPos(3.1, 0);
-const root = new THREE.Group();
-root.position.set(sp.x, 0, sp.z);
-
-// Funnel swirling dust particles
-const PCOUNT = 950;
-const pPos = new Float32Array(PCOUNT * 3);
-const pCol = new Float32Array(PCOUNT * 3);
-const pData = [];
-for (let i = 0; i < PCOUNT; i++) {
-  const h = Math.random() * 5.2;
-  const r = 0.14 + Math.pow(h / 5.2, 1.45) * 1.65 + (Math.random() - 0.5) * 0.16;
-  const a = Math.random() * Math.PI * 2;
-  pData.push({ h, r, a, spd: (5.5 - h * 0.6) + Math.random() * 2.5 });
-  const c = new THREE.Color().lerpColors(new THREE.Color(0x6b5c4d), new THREE.Color(0xb8c0c8), h / 5.2);
-  pCol[i * 3] = c.r; pCol[i * 3 + 1] = c.g; pCol[i * 3 + 2] = c.b;
-}
-const geo = new THREE.BufferGeometry();
-geo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
-geo.setAttribute("color", new THREE.BufferAttribute(pCol, 3));
-const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.095, vertexColors: true, transparent: true, opacity: 0.78, depthWrite: false }));
-root.add(pts);
-
-// Debris rocks flying around funnel
-const debris = [];
-const debMat = new THREE.MeshStandardMaterial({ color: 0x4f463c, roughness: 0.85 });
-for (let i = 0; i < 24; i++) {
-  const dm = new THREE.Mesh(new THREE.DodecahedronGeometry(0.035 + Math.random() * 0.045, 0), debMat);
-  root.add(dm);
-  debris.push({ m: dm, h: 0.2 + Math.random() * 4.0, a: Math.random() * 6.28, spd: 3.5 + Math.random() * 3 });
-}
-
-// Roaring wind audio
-const ctx = APP.sfx.ctx;
-let windSrc = null;
-if (ctx) {
-  const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  windSrc = ctx.createBufferSource(); windSrc.buffer = buf; windSrc.loop = true;
-  const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 260; bp.Q.value = 1.8;
-  const gn = ctx.createGain(); gn.gain.value = 0.22;
-  windSrc.connect(bp).connect(gn).connect(ctx.destination);
-  windSrc.start();
-}
-
-APP.scene.add(root);
-APP.fx.groundPulse(sp.x, sp.z, 2.8, 0x88aa99);
-const ent = APP.registerEntity({
-  name: "tornado", type: "tornado", root, box: new THREE.Box3(new THREE.Vector3(sp.x-1.6,0,sp.z-1.6), new THREE.Vector3(sp.x+1.6,5.2,sp.z+1.6)), buildDur: 0.4,
-  upd: (dt, t) => {
-    root.position.x = sp.x + Math.sin(t * 0.6) * 0.55;
-    root.position.z = sp.z + Math.cos(t * 0.45) * 0.45;
-    const arr = geo.attributes.position.array;
-    for (let i = 0; i < PCOUNT; i++) {
-      const pd = pData[i];
-      pd.a += pd.spd * dt;
-      pd.h = (pd.h + dt * 1.15) % 5.2;
-      const rad = 0.14 + Math.pow(pd.h / 5.2, 1.45) * 1.65;
-      arr[i * 3] = Math.cos(pd.a) * rad + Math.sin(pd.h * 1.5 + t * 2) * 0.12;
-      arr[i * 3 + 1] = pd.h;
-      arr[i * 3 + 2] = Math.sin(pd.a) * rad;
-    }
-    geo.attributes.position.needsUpdate = true;
-    for (const db of debris) {
-      db.a += db.spd * dt;
-      const rad = 0.25 + Math.pow(db.h / 5.2, 1.4) * 1.7;
-      db.m.position.set(Math.cos(db.a) * rad, db.h, Math.sin(db.a) * rad);
-      db.m.rotation.x += dt * 4; db.m.rotation.y += dt * 5;
-    }
-    // Pull loose/grabbable nearby objects into vortex orbit
-    for (const o of APP.entities) {
-      if (o === ent || o.dissolveStart || !o.grabbable || o.heldBy) continue;
-      const dx = root.position.x - o.root.position.x, dz = root.position.z - o.root.position.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist < 4.5 && dist > 0.25) {
-        o.root.position.x += (dx / dist * 0.7 - dz / dist * 1.6) * dt;
-        o.root.position.z += (dz / dist * 0.7 + dx / dist * 1.6) * dt;
-        o.root.position.y = Math.min(2.8, o.root.position.y + dt * 0.45);
-        o.root.rotation.y += dt * 3.5;
-      }
-    }
-  },
-  dispose: () => { if (windSrc) try { windSrc.stop(); } catch {} }
-});
-
-@ability: make_float
-@match: make & float | float | levitate | اجعله يطفو | يطفو
-@code:
-const ent = APP.findEntities("last")[0];
-if (!ent) return;
-APP.sfx.play("magic");
-const targetY = Math.max(1.25, ent.root.position.y + 0.55);
-ent.grabbable = true;
-APP.onTick("float_" + ent.id, 0, (dt, t) => {
-  if (!ent.root.parent || ent.dissolveStart) { APP.stopTick("float_" + ent.id); return; }
-  if (ent.heldBy) return;
-  ent.root.position.y += (targetY + Math.sin(t * 2.1) * 0.14 - ent.root.position.y) * Math.min(1, dt * 3.5);
-  ent.root.rotation.y += dt * 0.45;
-  if (Math.random() < 0.28) {
-    const b = APP.computeBox(ent.root);
-    APP.fx.spawnPoint("glow", b.min.x + Math.random() * (b.max.x - b.min.x), b.min.y, b.min.z + Math.random() * (b.max.z - b.min.z), 0.7, 0x66ffdd);
-  }
-});
-
-@ability: clone_target
-@match: clone | استنسخه | نسخ | استنساخ
-@code:
-const THREE = APP.THREE;
-const src = APP.findEntities("last")[0];
-if (!src) return;
-APP.sfx.play("build");
-const offsets = [[-1.35, -0.55], [1.35, -0.55], [0, -1.45]];
-for (let i = 0; i < 3; i++) {
-  const cloneRoot = (THREE.SkeletonUtils && THREE.SkeletonUtils.clone) ? THREE.SkeletonUtils.clone(src.root) : src.root.clone(true);
-  cloneRoot.traverse(o => {
-    if (o.isMesh && o.material) {
-      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
-      o.userData._mxPatched = false;
-    }
-  });
-  cloneRoot.position.set(src.root.position.x + offsets[i][0], src.root.position.y, src.root.position.z + offsets[i][1]);
-  APP.scene.add(cloneRoot);
-  const b = APP.computeBox(cloneRoot);
-  const mxU = APP.applyDissolveShader(cloneRoot, b.min.y, b.max.y, false);
-  APP.fx.groundPulse(cloneRoot.position.x, cloneRoot.position.z, 1.2, 0x00ff66);
-  APP.registerEntity({ name: src.name + " clone", type: src.type, root: cloneRoot, box: b, matrixUniforms: mxU, buildDur: 1.5, grabbable: src.grabbable });
-}
-
-@ability: turn_gold
-@match: turn & gold | gold | حوله إلى ذهب | حوله الى ذهب | ذهب
-@code:
-const THREE = APP.THREE;
-const ent = APP.findEntities("last")[0];
-if (!ent) return;
-APP.sfx.play("magic");
-ent.root.traverse(o => {
-  if (!o.isMesh) return;
-  const goldMat = new THREE.MeshPhysicalMaterial({
-    color: 0xffd24c, metalness: 1.0, roughness: 0.13, clearcoat: 0.65, clearcoatRoughness: 0.08, envMapIntensity: 2.6
-  });
-  o.material = goldMat;
-  o.userData._mxPatched = false;
-});
-const b = APP.computeBox(ent.root);
-ent.matrixUniforms = APP.applyDissolveShader(ent.root, b.min.y, b.max.y, false);
-ent.matrixUniforms.uProg.value = 1;
-APP.fx.groundPulse(ent.root.position.x, ent.root.position.z, 1.5, 0xffd24c);
-
-// Golden Matrix sweep up the object
-const dur = 1.4;
-APP.onTick("gold_sweep_" + ent.id, dur, (dt, t, ) => {
-  const span = Math.max(0.2, b.max.y - b.min.y);
-  for (let i = 0; i < 6; i++) {
-    const px = b.min.x + Math.random() * (b.max.x - b.min.x);
-    const py = b.min.y + Math.random() * span;
-    const pz = b.min.z + Math.random() * (b.max.z - b.min.z);
-    APP.fx.spawnPoint("matrix", px, py, pz, 1.0, 0xffd54f);
-  }
-});
-
-@ability: make_transparent
-@match: transparent | glass | اجعله شفاف | شفاف | زجاج
-@code:
-const THREE = APP.THREE;
-const ent = APP.findEntities("last")[0];
-if (!ent) return;
-APP.sfx.play("magic");
-ent.root.traverse(o => {
-  if (!o.isMesh || !o.material) return;
-  const mats = Array.isArray(o.material) ? o.material : [o.material];
-  const glassMats = mats.map(m => new THREE.MeshPhysicalMaterial({
-    color: 0xdff6ff, map: null, normalMap: m.normalMap || null, bumpMap: m.bumpMap || null,
-    roughness: 0.04, metalness: 0.08, clearcoat: 1.0, clearcoatRoughness: 0.02,
-    transparent: true, opacity: 0.34, depthWrite: false, envMapIntensity: 2.6
-  }));
-  o.material = Array.isArray(o.material) ? glassMats : glassMats[0];
-  o.userData._mxPatched = false;
-});
-const b = APP.computeBox(ent.root);
-ent.matrixUniforms = APP.applyDissolveShader(ent.root, b.min.y, b.max.y, false);
-ent.matrixUniforms.uProg.value = 1;
-APP.fx.spawnBox(b, "frost", 24);
-
-@ability: explode_reconstruct
-@match: explode | فجره | انفجار
-@code:
-const THREE = APP.THREE;
-const ent = APP.findEntities("last")[0];
-if (!ent) return;
-
-// Sample points across the object's surface for debris shards
-const box = APP.computeBox(ent.root);
-const center = box.getCenter(new THREE.Vector3());
-const shards = [];
-const v = new THREE.Vector3();
-ent.root.updateMatrixWorld(true);
-ent.root.traverse(o => {
-  if (!o.isMesh || !o.geometry) return;
-  const pos = o.geometry.attributes.position; if (!pos) return;
-  const step = Math.max(1, Math.floor(pos.count / 90));
-  for (let i = 0; i < pos.count && shards.length < 360; i += step) {
-    v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
-    const dir = v.clone().sub(center).normalize();
-    if (dir.lengthSq() < 0.01) dir.set(Math.random() - 0.5, 1, Math.random() - 0.5).normalize();
-    shards.push({
-      home: v.clone(), pos: v.clone(),
-      vel: dir.multiplyScalar(2.8 + Math.random() * 4.5).add(new THREE.Vector3(0, 1.5 + Math.random() * 2.5, 0))
-    });
-  }
-});
-if (!shards.length) return;
-
-// Explosion boom SFX
-const ctx = APP.sfx.ctx;
-if (ctx) {
-  const t = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
-  o.type = "sine"; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(28, t + 0.75);
-  g.gain.setValueAtTime(0.32, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
-  o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.82);
-}
-
-const pArr = new Float32Array(shards.length * 3);
-const pCol = new Float32Array(shards.length * 3);
-const geo = new THREE.BufferGeometry();
-geo.setAttribute("position", new THREE.BufferAttribute(pArr, 3));
-geo.setAttribute("color", new THREE.BufferAttribute(pCol, 3));
-const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.075, vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
-APP.scene.add(pts);
-
-ent.root.visible = false;
-APP.fx.groundPulse(center.x, center.z, 3.0, 0xff6600);
-APP.fx.spawnBox(box, "fire", 45);
-APP.fx.spawnBox(box, "smoke", 25);
-
-let elapsed = 0;
-const explodePhase = 1.7, rewindPhase = 1.6, totalDur = explodePhase + rewindPhase;
-APP.onTick("explode_" + ent.id, totalDur, (dt) => {
-  elapsed += dt;
-  const pa = geo.attributes.position.array;
-  const ca = geo.attributes.color.array;
-  if (elapsed < explodePhase) {
-    for (let i = 0; i < shards.length; i++) {
-      const s = shards[i];
-      s.vel.y -= 9.8 * dt;
-      s.pos.addScaledVector(s.vel, dt);
-      if (s.pos.y < 0.03) { s.pos.y = 0.03; s.vel.y *= -0.45; s.vel.x *= 0.8; s.vel.z *= 0.8; }
-      pa[i*3] = s.pos.x; pa[i*3+1] = s.pos.y; pa[i*3+2] = s.pos.z;
-      ca[i*3] = 1.0; ca[i*3+1] = 0.45; ca[i*3+2] = 0.1;
-    }
-  } else {
-    const k = Math.min(1, (elapsed - explodePhase) / rewindPhase);
-    if (!ent.root.visible) {
-      ent.root.visible = true;
-      ent.birth = performance.now() / 1000;
-      ent.buildDur = rewindPhase;
-      APP.sfx.play("build");
-    }
-    for (let i = 0; i < shards.length; i++) {
-      const s = shards[i];
-      s.pos.lerp(s.home, Math.min(1, dt * 6.5));
-      pa[i*3] = s.pos.x; pa[i*3+1] = s.pos.y; pa[i*3+2] = s.pos.z;
-      ca[i*3] = 0.1; ca[i*3+1] = 1.0; ca[i*3+2] = 0.45;
-    }
-  }
-  geo.attributes.position.needsUpdate = true;
-  geo.attributes.color.needsUpdate = true;
-}, () => {
-  APP.scene.remove(pts);
-  geo.dispose();
-  ent.root.visible = true;
-});
-
-@ability: spawn_black_hole
-@match: black & hole | افتح ثقب أسود | ثقب أسود | ثقب اسود
-@code:
-const THREE = APP.THREE;
-const sp = APP.spawnPos(2.8, 0);
-const root = new THREE.Group();
-root.position.set(sp.x, 1.45, sp.z);
-
-// Pure black Event Horizon
-const horizon = new THREE.Mesh(new THREE.SphereGeometry(0.32, 32, 24), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-root.add(horizon);
-
-// Glowing Einstein Lensing Halo
-const haloMat = new THREE.ShaderMaterial({
-  transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vN = normalize(normalMatrix * normal); vec4 mv = modelViewMatrix * vec4(position,1.0); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }`,
-  fragmentShader: `varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1.0 - max(0.0, dot(vN, vV)), 3.2); gl_FragColor = vec4(vec3(1.0, 0.55, 0.18) * rim * 2.2, rim); }`
-});
-root.add(new THREE.Mesh(new THREE.SphereGeometry(0.38, 32, 24), haloMat));
-
-// Relativistic Swirling Accretion Disk
-const diskUniforms = { uTime: { value: 0 } };
-const diskMat = new THREE.ShaderMaterial({
-  uniforms: diskUniforms, transparent: true, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-  fragmentShader: `
-    uniform float uTime; varying vec2 vUv;
-    void main(){
-      vec2 p = vUv * 2.0 - 1.0;
-      float r = length(p);
-      if (r < 0.31 || r > 1.0) discard;
-      float a = atan(p.y, p.x);
-      float spiral = sin(a * 4.0 + r * 18.0 - uTime * 7.0) * 0.5 + 0.5;
-      float ring = smoothstep(0.31, 0.42, r) * (1.0 - smoothstep(0.65, 1.0, r));
-      vec3 col = mix(vec3(1.0, 0.32, 0.05), vec3(1.0, 0.92, 0.72), spiral * 0.7 + (1.0 - r) * 0.5);
-      gl_FragColor = vec4(col * (0.9 + spiral * 0.9), ring * 0.95);
-    }`
-});
-const disk = new THREE.Mesh(new THREE.PlaneGeometry(2.3, 2.3), diskMat);
-disk.rotation.x = -Math.PI / 2 + 0.28;
-root.add(disk);
-
-// Gravitational Distortion Outer Ring
-const lensRing = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.72, 48), diskMat);
-lensRing.lookAt(APP.headPos);
-root.add(lensRing);
-
-// Deep sub-bass hum
-const ctx = APP.sfx.ctx;
-let humOsc = null;
-if (ctx) {
-  humOsc = ctx.createOscillator(); const gn = ctx.createGain();
-  humOsc.type = "sine"; humOsc.frequency.value = 46;
-  gn.gain.value = 0.08;
-  humOsc.connect(gn).connect(ctx.destination); humOsc.start();
-}
-
-APP.scene.add(root);
-APP.fx.groundPulse(sp.x, sp.z, 3.2, 0xff7722);
-const ent = APP.registerEntity({
-  name: "black hole", type: "black_hole", root, box: new THREE.Box3(new THREE.Vector3(sp.x-1,0.4,sp.z-1), new THREE.Vector3(sp.x+1,2.4,sp.z+1)), buildDur: 0.2,
-  upd: (dt, t) => {
-    diskUniforms.uTime.value = t;
-    lensRing.lookAt(APP.headPos);
-    if (Math.random() < 0.85) {
-      const a = Math.random() * 6.28, r = 1.2 + Math.random() * 1.4;
-      APP.fx.spawnPoint("sparks", root.position.x + Math.cos(a) * r, root.position.y + (Math.random() - 0.5) * 0.6, root.position.z + Math.sin(a) * r, 0.7, 0xff9933);
-    }
-    // Pull nearby loose/grabbable objects smoothly toward singularity
-    for (const o of APP.entities) {
-      if (o === ent || o.dissolveStart || !o.grabbable || o.heldBy) continue;
-      const dVec = root.position.clone().sub(o.root.position);
-      const dist = dVec.length();
-      if (dist < 6.0 && dist > 0.35) {
-        dVec.normalize();
-        const pull = (1.15 / Math.max(0.5, dist)) * dt;
-        o.root.position.addScaledVector(dVec, pull);
-        o.root.position.x += -dVec.z * pull * 0.6;
-        o.root.position.z += dVec.x * pull * 0.6;
-        o.root.rotation.y += dt * 1.2;
-      } else if (dist <= 0.35 && o.root.scale.x > 0.05) {
-        o.root.scale.multiplyScalar(0.95);
-        if (o.root.scale.x <= 0.06) APP.dissolve({ target: o.id, duration: 0.3, pattern: "burn", edgeColor: "#ff8822" });
-      }
-    }
-  },
-  dispose: () => { if (humOsc) try { humOsc.stop(); } catch {} }
-});
-
-@ability: spawn_galaxy
-@match: create & galaxy | galaxy | اصنع مجرة | اصنع مجره | مجرة | مجره
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("magic");
-const root = new THREE.Group();
-const STARS = 8500;
-const pos = new Float32Array(STARS * 3);
-const col = new Float32Array(STARS * 3);
-const cIn = new THREE.Color(0xffdfa8), cMid = new THREE.Color(0x38b6ff), cOut = new THREE.Color(0x9b3dff);
-
-for (let i = 0; i < STARS; i++) {
-  const r = 1.6 + Math.pow(Math.random(), 1.25) * 16.0;
-  const branch = (i % 4) * ((Math.PI * 2) / 4);
-  const spin = r * 0.38;
-  const scatter = Math.pow(Math.random(), 2.2) * (Math.random() < 0.5 ? 1 : -1) * (0.28 + r * 0.12);
-  const ang = branch + spin + scatter * 0.35;
-  pos[i * 3] = Math.cos(ang) * r + scatter;
-  pos[i * 3 + 1] = (Math.random() - 0.5) * (1.8 + r * 0.14) + 1.5;
-  pos[i * 3 + 2] = Math.sin(ang) * r + scatter;
-
-  const mixC = r < 6 ? cIn.clone().lerp(cMid, r / 6) : cMid.clone().lerp(cOut, (r - 6) / 11);
-  col[i * 3] = mixC.r; col[i * 3 + 1] = mixC.g; col[i * 3 + 2] = mixC.b;
-}
-const gGeo = new THREE.BufferGeometry();
-gGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-gGeo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-const stars = new THREE.Points(gGeo, new THREE.PointsMaterial({ size: 0.085, vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
-root.add(stars);
-
-// Outer background deep starfield dome
-const bgGeo = new THREE.BufferGeometry();
-const bgPos = new Float32Array(2500 * 3);
-for (let i = 0; i < 2500; i++) {
-  const th = Math.random() * 6.28, ph = Math.acos(2 * Math.random() - 1), rr = 22 + Math.random() * 8;
-  bgPos[i * 3] = rr * Math.sin(ph) * Math.cos(th);
-  bgPos[i * 3 + 1] = rr * Math.cos(ph);
-  bgPos[i * 3 + 2] = rr * Math.sin(ph) * Math.sin(th);
-}
-bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
-root.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.09, transparent: true, opacity: 0.8 })));
-
-APP.scene.background = new THREE.Color(0x02030a);
-APP.scene.add(root);
-APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 5.0, 0x8855ff);
-APP.registerEntity({
-  name: "galaxy", type: "env_360", root, box: new THREE.Box3(new THREE.Vector3(-18,-4,-18), new THREE.Vector3(18,10,18)), buildDur: 0.5,
-  upd: (dt) => { root.rotation.y += dt * 0.065; },
-  dispose: () => { if (!APP.renderer.xr.isPresenting) APP.scene.background = new THREE.Color(0x0b100e); }
-});
-
-@ability: underwater_world
-@match: underwater | under & water | اجعلني تحت الماء | تحت الماء
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("splash");
-const root = new THREE.Group();
-
-// Deep ocean fog & light
-const prevFog = APP.scene.fog;
-const prevBg = APP.scene.background;
-APP.scene.background = new THREE.Color(0x053a54);
-APP.scene.fog = new THREE.FogExp2(0x064463, 0.085);
-
-// Animated Caustics Ocean Floor
-const cUniforms = { uTime: { value: 0 } };
-const causticsMat = new THREE.ShaderMaterial({
-  uniforms: cUniforms, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv * 12.0; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-  fragmentShader: `
-    uniform float uTime; varying vec2 vUv;
-    void main(){
-      vec2 p = vUv;
-      float c1 = sin(p.x * 2.5 + uTime * 1.4 + sin(p.y * 2.1 - uTime)) * cos(p.y * 2.3 - uTime * 1.1);
-      float c2 = sin((p.x + p.y) * 2.1 - uTime * 1.6);
-      float k = pow(clamp(0.5 + 0.5 * (c1 + c2) * 0.5, 0.0, 1.0), 4.5);
-      gl_FragColor = vec4(vec3(0.25, 0.85, 1.0) * k * 0.65, k * 0.55);
-    }`
-});
-const floorMesh = new THREE.Mesh(new THREE.CircleGeometry(18, 48).rotateX(-Math.PI / 2), causticsMat);
-floorMesh.position.y = 0.025;
-root.add(floorMesh);
-
-// Swaying Kelp Forest
-const kelps = [];
-const kelpMat = new THREE.MeshStandardMaterial({ color: 0x166b47, roughness: 0.6, side: THREE.DoubleSide });
-for (let i = 0; i < 28; i++) {
-  const a = (i / 28) * Math.PI * 2, r = 2.6 + (i % 4) * 1.8, h = 2.2 + (i % 3) * 1.1;
-  const k = new THREE.Mesh(new THREE.PlaneGeometry(0.18, h, 1, 8), kelpMat);
-  k.position.set(Math.cos(a) * r, h * 0.5, Math.sin(a) * r);
-  k.rotation.y = a;
-  root.add(k);
-  kelps.push({ m: k, ph: i });
-}
-
-// School of colorful swimming fish
-const fishSchool = [];
-const fishColors = [0xff7722, 0x22ddff, 0xffdd33, 0xff4488];
-for (let i = 0; i < 16; i++) {
-  const fg = new THREE.Group();
-  const mat = new THREE.MeshPhysicalMaterial({ color: fishColors[i % 4], roughness: 0.25, clearcoat: 0.8 });
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 10), mat);
-  body.scale.set(0.55, 0.75, 1.8);
-  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.12, 4), mat);
-  tail.rotation.x = Math.PI / 2; tail.position.z = -0.16;
-  fg.add(body, tail);
-  root.add(fg);
-  fishSchool.push({ g: fg, tail, a: (i / 16) * Math.PI * 2, r: 1.8 + (i % 4) * 0.9, y: 0.8 + (i % 5) * 0.45, spd: 0.45 + (i % 3) * 0.22 });
-}
-
-// Floating ocean bubbles & plankton
-const bCount = 260, bPos = new Float32Array(bCount * 3);
-for (let i = 0; i < bCount; i++) {
-  bPos[i * 3] = (Math.random() - 0.5) * 12; bPos[i * 3 + 1] = Math.random() * 5; bPos[i * 3 + 2] = (Math.random() - 0.5) * 12;
-}
-const bGeo = new THREE.BufferGeometry(); bGeo.setAttribute("position", new THREE.BufferAttribute(bPos, 3));
-root.add(new THREE.Points(bGeo, new THREE.PointsMaterial({ color: 0xbef4ff, size: 0.045, transparent: true, opacity: 0.65 })));
-
-APP.scene.add(root);
-APP.registerEntity({
-  name: "underwater world", type: "env_360", root, box: new THREE.Box3(new THREE.Vector3(-12,0,-12), new THREE.Vector3(12,6,12)), buildDur: 0.4,
-  upd: (dt, t) => {
-    cUniforms.uTime.value = t;
-    for (const kp of kelps) kp.m.rotation.z = Math.sin(t * 1.4 + kp.ph) * 0.16;
-    for (const f of fishSchool) {
-      f.a += f.spd * dt;
-      const nx = Math.cos(f.a) * f.r, nz = Math.sin(f.a) * f.r, ny = f.y + Math.sin(t * 1.5 + f.a) * 0.18;
-      f.g.lookAt(nx, ny, nz);
-      f.g.position.set(nx, ny, nz);
-      f.tail.rotation.y = Math.sin(t * 11 + f.a) * 0.45;
-    }
-    const arr = bGeo.attributes.position.array;
-    for (let i = 0; i < bCount; i++) {
-      arr[i * 3 + 1] += dt * 0.35;
-      if (arr[i * 3 + 1] > 5.0) arr[i * 3 + 1] = 0.05;
-    }
-    bGeo.attributes.position.needsUpdate = true;
-  },
-  dispose: () => { APP.scene.fog = prevFog; APP.scene.background = prevBg; }
-});
-
-@ability: cast_lightning
-@match: lightning | thunder | اصنع برق | برق
-@code:
-const THREE = APP.THREE;
-// Start from active VR hand (or right hand / camera offset)
-const activeHand = APP.hands.find(h => !h.isDesk && h.model && h.model.root.visible) || null;
-const startPt = activeHand ? activeHand.tipWp.clone() : APP.headPos.clone().add(new THREE.Vector3(0.2, -0.15, 0)).addScaledVector(APP.headFwd, 0.35);
-
-// Target closest object or forward point
-const ent = APP.findEntities("last")[0];
-const endPt = ent ? APP.computeBox(ent.root).getCenter(new THREE.Vector3()) : APP.headPos.clone().addScaledVector(APP.headFwd, 3.2).setY(0.4);
-
-const boltGroup = new THREE.Group();
-const buildJaggedBolt = (p1, p2, disp, depth) => {
-  const segs = 14;
-  const pts = [p1.clone()];
-  for (let i = 1; i < segs; i++) {
-    const t = i / segs;
-    const pt = p1.clone().lerp(p2, t);
-    const env = Math.sin(t * Math.PI);
-    pt.x += (Math.random() - 0.5) * disp * env;
-    pt.y += (Math.random() - 0.5) * disp * env;
-    pt.z += (Math.random() - 0.5) * disp * env;
-    pts.push(pt);
-    if (depth > 0 && Math.random() < 0.28) {
-      const brEnd = pt.clone().add(new THREE.Vector3((Math.random()-0.5)*0.9, -0.3 + (Math.random()-0.5)*0.5, (Math.random()-0.5)*0.9));
-      buildJaggedBolt(pt, brEnd, disp * 0.45, 0);
-    }
-  }
-  pts.push(p2.clone());
-  const tube = new THREE.Mesh(
-    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 18, depth > 0 ? 0.016 : 0.007, 6, false),
-    new THREE.MeshBasicMaterial({ color: depth > 0 ? 0xdff8ff : 0x66ccff })
-  );
-  boltGroup.add(tube);
-};
-buildJaggedBolt(startPt, endPt, 0.45, 1);
-
-const flashLight = new THREE.PointLight(0xbbe8ff, 8.0, 16, 1.5);
-flashLight.position.copy(startPt).lerp(endPt, 0.5);
-boltGroup.add(flashLight);
-APP.scene.add(boltGroup);
-
-APP.fx.groundPulse(endPt.x, Math.max(0, endPt.z), 2.2, 0x88ddff);
-for (let i = 0; i < 32; i++) APP.fx.spawnPoint("sparks", endPt.x, endPt.y, endPt.z, 1.1, 0x99e6ff);
-
-// Crack + Thunder Boom SFX
-const ctx = APP.sfx.ctx;
-if (ctx) {
-  const t = ctx.currentTime, len = Math.floor(ctx.sampleRate * 1.4);
-  const buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) {
-    const crack = i < ctx.sampleRate * 0.09 ? (Math.random() * 2 - 1) * 0.9 : 0;
-    const rumble = (Math.random() * 2 - 1) * 0.45 * Math.exp(-i / (ctx.sampleRate * 0.45));
-    d[i] = crack + rumble;
-  }
-  const src = ctx.createBufferSource(); src.buffer = buf;
-  const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.setValueAtTime(3200, t); lp.frequency.exponentialRampToValueAtTime(140, t + 1.2);
-  src.connect(lp).connect(ctx.destination); src.start(t);
-}
-
-let age = 0;
-APP.onTick("lightning_" + Date.now(), 0.48, (dt) => {
-  age += dt;
-  flashLight.intensity = (age % 0.14 < 0.07 ? 8.5 : 1.8) * Math.max(0, 1 - age / 0.48);
-  boltGroup.visible = age < 0.12 || (age > 0.18 && age < 0.3);
-}, () => {
-  APP.scene.remove(boltGroup);
-  boltGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
-});
-
-@ability: make_hologram
-@match: hologram | اصنع هولوغرام | هولوغرام
-@code:
-const THREE = APP.THREE;
-const ent = APP.findEntities("last")[0];
-if (!ent) return;
-APP.sfx.play("magic");
-const hUniforms = { uTime: { value: 0 } };
-const holoMat = new THREE.ShaderMaterial({
-  uniforms: hUniforms, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-  vertexShader: `
-    varying vec3 vN; varying vec3 vW; varying vec3 vV;
-    void main(){
-      vec4 w = modelMatrix * vec4(position, 1.0);
-      vW = w.xyz;
-      vN = normalize(normalMatrix * normal);
-      vec4 mv = viewMatrix * w;
-      vV = normalize(-mv.xyz);
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: `
-    uniform float uTime; varying vec3 vN; varying vec3 vW; varying vec3 vV;
-    void main(){
-      float fresnel = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.2);
-      float scan = 0.5 + 0.5 * sin(vW.y * 55.0 - uTime * 9.0);
-      float flicker = 0.85 + 0.15 * sin(uTime * 37.0);
-      vec3 col = mix(vec3(0.0, 0.72, 1.0), vec3(0.15, 1.0, 0.72), scan);
-      float alpha = clamp((fresnel * 0.9 + 0.18) * (0.45 + scan * 0.55) * flicker, 0.08, 0.95);
-      gl_FragColor = vec4(col * 1.45, alpha);
-    }`
-});
-ent.root.traverse(o => {
-  if (o.isMesh) { o.material = holoMat; o.userData._mxPatched = true; }
-});
-ent.physBob = 0.03; ent.baseY = ent.root.position.y + 0.12;
-APP.onTick("holo_" + ent.id, 0, (dt, t) => {
-  if (!ent.root.parent || ent.dissolveStart) { APP.stopTick("holo_" + ent.id); return; }
-  hUniforms.uTime.value = t;
-  if (Math.random() < 0.35) APP.fx.spawnBox(APP.computeBox(ent.root), "matrix", 1);
-});
-
-@ability: scan_room
-@match: scan & room | scan & the & room | مسح الغرفة | امسح الغرفة
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("build");
-
-// Try to read real Quest Guardian / Room bounds if available, else create calibrated room bounds
-let bounds = [
-  new THREE.Vector3(-2.6, 0, -2.6), new THREE.Vector3(2.6, 0, -2.6),
-  new THREE.Vector3(2.6, 0, 2.6),  new THREE.Vector3(-2.6, 0, 2.6)
-];
-const refSpace = APP.renderer.xr.getReferenceSpace ? APP.renderer.xr.getReferenceSpace() : null;
-if (refSpace && refSpace.boundsGeometry && refSpace.boundsGeometry.length >= 3) {
-  bounds = refSpace.boundsGeometry.map(p => new THREE.Vector3(p.x, 0, p.z));
-}
-
-// Compute min/max X and Z wall limits
-let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-for (const p of bounds) {
-  if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-  if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
-}
-
-// Visual LiDAR scan mesh showing detected walls & floor
-const scanGroup = new THREE.Group();
-const wallH = 2.6;
-const wireMat = new THREE.MeshBasicMaterial({ color: 0x00ffaa, wireframe: true, transparent: true, opacity: 0.48 });
-const floorGrid = new THREE.Mesh(new THREE.PlaneGeometry(maxX - minX, maxZ - minZ, 16, 16).rotateX(-Math.PI / 2), wireMat);
-floorGrid.position.set((minX + maxX) / 2, 0.02, (minZ + maxZ) / 2);
-scanGroup.add(floorGrid);
-
-for (let i = 0; i < bounds.length; i++) {
-  const a = bounds[i], b = bounds[(i + 1) % bounds.length];
-  const len = a.distanceTo(b);
-  const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, wallH, 10, 6), wireMat);
-  wall.position.set((a.x + b.x) / 2, wallH / 2, (a.z + b.z) / 2);
-  wall.lookAt((a.x + b.x) / 2 - (b.z - a.z), wallH / 2, (a.z + b.z) / 2 + (b.x - a.x));
-  scanGroup.add(wall);
-}
-APP.scene.add(scanGroup);
-APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
-
-// Fade visual grid after 3.5s while keeping real wall & floor physics collisions active
-let scanAge = 0;
-APP.onTick("room_collision", 0, (dt) => {
-  scanAge += dt;
-  if (scanGroup.parent) {
-    wireMat.opacity = Math.max(0, 0.48 * (1 - Math.max(0, scanAge - 2.2) / 1.5));
-    if (wireMat.opacity <= 0.01) APP.scene.remove(scanGroup);
-  }
-  for (const e of APP.entities) {
-    if (e.dissolveStart || e.heldBy || e.type === "forest" || e.type === "env_360") continue;
-    const b = APP.computeBox(e.root);
-    if (b.isEmpty()) continue;
-    if (b.min.y < 0) e.root.position.y += -b.min.y;
-    if (b.max.y > wallH) e.root.position.y -= (b.max.y - wallH);
-    if (b.min.x < minX) e.root.position.x += (minX - b.min.x);
-    if (b.max.x > maxX) e.root.position.x -= (b.max.x - maxX);
-    if (b.min.z < minZ) e.root.position.z += (minZ - b.min.z);
-    if (b.max.z > maxZ) e.root.position.z -= (b.max.z - maxZ);
-  }
-}, () => APP.scene.remove(scanGroup));
-APP.say("📡 تم مسح الجدران والأرضية وتفعيل التصادم");
-
-@ability: change_room_360
-@match: غير الغرفة | غير الغرفه | change & room | room
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("build");
-// Dissolve any previous 360 room
-for (const e of APP.entities) {
-  if (e.type === "env_360" && !e.dissolveStart) APP.dissolve({ target: e.id, duration: 0.4 });
-}
-let tex = APP.findImage("room.jpg");
-if (!tex) {
-  // Procedural futuristic 360 panoramic room fallback
-  const cv = document.createElement("canvas"); cv.width = 2048; cv.height = 1024;
-  const g = cv.getContext("2d");
-  const grad = g.createLinearGradient(0, 0, 0, 1024);
-  grad.addColorStop(0, "#121726"); grad.addColorStop(0.5, "#1f2b3d"); grad.addColorStop(1, "#0d1016");
-  g.fillStyle = grad; g.fillRect(0, 0, 2048, 1024);
-  g.strokeStyle = "rgba(0, 255, 170, 0.25)"; g.lineWidth = 3;
-  for (let x = 0; x <= 2048; x += 128) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 1024); g.stroke(); }
-  for (let y = 128; y < 1024; y += 128) { g.beginPath(); g.moveTo(0, y); g.lineTo(2048, y); g.stroke(); }
-  g.fillStyle = "rgba(255, 180, 90, 0.35)";
-  for (let x = 160; x < 2048; x += 512) g.fillRect(x, 310, 240, 290);
-  tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
-}
-
-const root = new THREE.Group();
-const sphere = new THREE.Mesh(
-  new THREE.SphereGeometry(22, 48, 32),
-  new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide })
-);
-sphere.position.y = 1.5;
-root.add(sphere);
-APP.scene.add(root);
-const mxU = APP.applyDissolveShader(root, 0, 14, true);
-APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
-APP.registerEntity({ name: "360 room", type: "env_360", root, box: new THREE.Box3(new THREE.Vector3(-22,-20,-22), new THREE.Vector3(22,24,22)), matrixUniforms: mxU, buildDur: 1.6 });
