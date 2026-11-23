@@ -1,18 +1,12 @@
+
 # ==============================================================================
 # DEVELOPER NOTE:
 # These are separated, modular prompt/physics blocks that Say-It-See-It.html
 # relies on. Every interaction, physics rule, and voice ability lives here as
 # an independent @ability: block. You can add, edit, reorder, or remove any
 # block freely without touching the HTML engine.
-#
-# - @autorun blocks automatically activate core physics/interaction modules on load.
-# - @fallback blocks run only if no specific @match rule matched (e.g. dynamic GLBs).
 # ==============================================================================
 
-
-# ------------------------------------------------------------------------------
-# MODULE 1: UNIVERSAL GRABBING & HAND INTERACTION (Remove to disable grabbing)
-# ------------------------------------------------------------------------------
 @ability: module_interaction_grab
 @autorun
 @code:
@@ -164,10 +158,6 @@ APP.on("clear", () => {
   APP.hands.forEach(h => { APP._releaseObj(h); releaseCloth(h); });
 });
 
-
-# ------------------------------------------------------------------------------
-# MODULE 2: AUTOMATIC ROOM WALL & FLOOR COLLISION PHYSICS
-# ------------------------------------------------------------------------------
 @ability: module_room_collision
 @autorun
 @code:
@@ -188,11 +178,9 @@ APP.onTick("mod_room_collision", 0, () => {
     const b = APP.computeBox(e.root);
     if (b.isEmpty()) continue;
 
-    // Floor & ceiling clamp
     if (b.min.y < 0) e.root.position.y += -b.min.y;
     if (b.max.y > wallH) e.root.position.y -= (b.max.y - wallH);
 
-    // Real scanned WebXR wall planes collision
     if (walls.length) {
       const c = b.getCenter(new THREE.Vector3());
       const halfSpan = b.getSize(new THREE.Vector3()).length() * 0.35;
@@ -208,7 +196,6 @@ APP.onTick("mod_room_collision", 0, () => {
         }
       }
     } else if (isFinite(minX)) {
-      // Guardian / Room bounds fallback
       if (b.min.x < minX) e.root.position.x += (minX - b.min.x);
       if (b.max.x > maxX) e.root.position.x -= (b.max.x - maxX);
       if (b.min.z < minZ) e.root.position.z += (minZ - b.min.z);
@@ -217,10 +204,6 @@ APP.onTick("mod_room_collision", 0, () => {
   }
 }, null, true);
 
-
-# ------------------------------------------------------------------------------
-# MODULE 3: CLOTH VERLET SIMULATION & MESH SPHERE COLLIDERS
-# ------------------------------------------------------------------------------
 @ability: module_cloth_physics
 @autorun
 @code:
@@ -386,10 +369,6 @@ APP._spawnCloth = (a = {}) => {
   return clothEnt;
 };
 
-
-# ------------------------------------------------------------------------------
-# MODULE 4: 3D PEN, CHAIN GRAVITY PHYSICS & MAGIC PEN SHAPE AI
-# ------------------------------------------------------------------------------
 @ability: module_pen_and_chains
 @autorun
 @code:
@@ -687,10 +666,6 @@ APP.on("clear", () => {
   activeStrokes.clear();
 });
 
-
-# ------------------------------------------------------------------------------
-# MODULE 5: REALISTIC WATER TANK, FLUID WAVES, DROPLETS & SWIMMING FISH
-# ------------------------------------------------------------------------------
 @ability: module_water_tank_physics
 @autorun
 @code:
@@ -883,11 +858,6 @@ APP._spawnWaterTank = (a = {}) => {
   });
   return currentTank;
 };
-
-
-# ==============================================================================
-# VOICE & INTERACTIVE ABILITIES (Add / Edit / Remove Any Ability Below)
-# ==============================================================================
 
 @ability: spawn_horse
 @match: create & horse | horse | اصنع & حصان | حصان
@@ -1216,7 +1186,6 @@ const playNote = (midi) => {
   });
 };
 
-// Realistic 23.8mm white key spacing & 13.2mm black keys (52 keys)
 const whitePitchStep = 0.0238, whiteW = 0.0226, whiteL = 0.148, whiteH = 0.022, blackW = 0.0132, blackL = 0.094, blackH = 0.015;
 const isBlack = [false, true, false, true, false, false, true, false, true, false, true, false];
 let wCount = 0; for (let m = 36; m <= 87; m++) if (!isBlack[m % 12]) wCount++;
@@ -1361,514 +1330,4 @@ if (world2Loaded) {
 const hingePivot = new THREE.Group(); hingePivot.position.set(-doorW / 2, 0, 0.01); root.add(hingePivot);
 const doorLeaf = new THREE.Mesh(new THREE.BoxGeometry(doorW, doorH, 0.055), oakMat); doorLeaf.position.set(doorW / 2, doorH / 2, 0); doorLeaf.castShadow = true; hingePivot.add(doorLeaf);
 [0.52, 1.48].forEach(py => { const pnl = new THREE.Mesh(new THREE.BoxGeometry(doorW*0.68, 0.66, 0.072), new THREE.MeshPhysicalMaterial({ map: woodTex, color: 0x3d2415, roughness: 0.4 })); pnl.position.set(doorW/2, py, 0); hingePivot.add(pnl); });
-const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.12, 10), brassMat); handle.rotation.z = Math.PI / 2; handle.position.set(doorW - 0.1, 1.0, 0.055); hingePivot.add(handle);
-
-APP.scene.add(root); APP.fx.groundPulse(sp.x, sp.z, 1.8, 0x00ff88);
-let openProg = 0;
-APP.registerEntity({
-  name: "front door", type: "door", root, box: APP.computeBox(root), buildDur: 0.9,
-  upd: (dt) => { if (openProg < 1) { openProg = Math.min(1, openProg + dt * 0.65); hingePivot.rotation.y = -(1 - Math.pow(1 - openProg, 3)) * 1.65; } }
-});
-
-@ability: spawn_butterfly
-@match: create & butterfly | butterfly | اصنع فراشة | اصنع فراشه | فراشة | فراشه
-@code:
-APP.sfx.play("magic");
-const sp = APP.spawnPos(1.35, 0);
-if (APP._spawnButterfly) APP._spawnButterfly(new APP.THREE.Vector3(sp.x, 1.38, sp.z), 0.22);
-
-@ability: make_rain
-@match: make & rain | rain | اجعلها تمطر | تمطر | مطر
-@code:
-const THREE = APP.THREE;
-const root = new THREE.Group();
-const COUNT = 1100;
-const positions = new Float32Array(COUNT * 6);
-const drops = [];
-for (let i = 0; i < COUNT; i++) {
-  drops.push({ x: APP.headPos.x + (Math.random()-0.5)*11, y: Math.random()*7.5, z: APP.headPos.z + (Math.random()-0.5)*11, spd: 7.5 + Math.random()*4.2, len: 0.22 + Math.random()*0.15 });
-}
-const rGeo = new THREE.BufferGeometry(); rGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-const rainLines = new THREE.LineSegments(rGeo, new THREE.LineBasicMaterial({ color: 0xc2e8ff, transparent: true, opacity: 0.5 }));
-rainLines.frustumCulled = false; root.add(rainLines);
-
-const splashes = Array.from({ length: 45 }, () => {
-  const m = new THREE.Mesh(new THREE.RingGeometry(0.02, 0.035, 16).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({ color: 0xd8f3ff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
-  m.visible = false; root.add(m); return { m, t: 1 };
-});
-
-for (const e of APP.entities) if (!e.dissolveStart) APP.modify({ target: e.id, rough: 0.1 });
-
-const ctx = APP.sfx.ctx;
-let rainSrc = null;
-if (ctx) {
-  const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  rainSrc = ctx.createBufferSource(); rainSrc.buffer = buf; rainSrc.loop = true;
-  const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 1800; bp.Q.value = 0.55;
-  const gn = ctx.createGain(); gn.gain.value = 0.09;
-  rainSrc.connect(bp).connect(gn).connect(ctx.destination); rainSrc.start();
-}
-
-let frozenMesh = null, isFrozen = false;
-APP.scene.add(root);
-const rainEnt = APP.registerEntity({
-  name: "rain", type: "weather", root, box: new THREE.Box3(new THREE.Vector3(-6,0,-6), new THREE.Vector3(6,8,6)), buildDur: 0.2,
-  upd: (dt) => {
-    if (isFrozen) return;
-    const attr = rGeo.attributes.position.array, windShift = APP.worldWind * 0.25;
-    for (let i = 0; i < COUNT; i++) {
-      const dr = drops[i]; dr.y -= dr.spd * dt; dr.x += windShift * dt;
-      if (dr.y <= 0.02) {
-        if (Math.random() < 0.08) { const sp = splashes.find(s => s.t >= 1); if (sp) { sp.t = 0; sp.m.position.set(dr.x, 0.015, dr.z); sp.m.visible = true; } }
-        dr.x = APP.headPos.x + (Math.random()-0.5)*11; dr.y = 7.0 + Math.random()*1.5; dr.z = APP.headPos.z + (Math.random()-0.5)*11;
-      }
-      const k = i * 6;
-      attr[k]=dr.x; attr[k+1]=dr.y; attr[k+2]=dr.z; attr[k+3]=dr.x-windShift*0.02; attr[k+4]=dr.y+dr.len; attr[k+5]=dr.z;
-    }
-    rGeo.attributes.position.needsUpdate = true;
-    for (const sp of splashes) {
-      if (sp.t >= 1) continue; sp.t += dt * 3.2;
-      if (sp.t >= 1) { sp.m.visible = false; continue; }
-      sp.m.scale.setScalar(1 + sp.t * 3.2); sp.m.material.opacity = (1 - sp.t) * 0.65;
-    }
-  },
-  dispose: () => { if (rainSrc) try { rainSrc.stop(); } catch {} }
-});
-
-// Hook called by freeze_ice: freezes drops into 3D mirror-reflective water teardrops!
-rainEnt._freezeRain = () => {
-  if (isFrozen) return;
-  isFrozen = true;
-  rainLines.visible = false;
-  if (rainSrc) try { rainSrc.stop(); } catch {}
-  const env = APP.updateReflection(APP.headPos);
-  const dropGeo = new THREE.SphereGeometry(0.015, 14, 12);
-  dropGeo.scale(0.85, 1.45, 0.85);
-  const mirrorDropMat = new THREE.MeshPhysicalMaterial({
-    color: 0xffffff, envMap: env, envMapIntensity: 3.6,
-    roughness: 0.008, metalness: 0.25, clearcoat: 1.0, clearcoatRoughness: 0.0,
-    transparent: true, opacity: 0.92
-  });
-  const frozenCount = Math.min(480, drops.length);
-  frozenMesh = new THREE.InstancedMesh(dropGeo, mirrorDropMat, frozenCount);
-  const dummy = new THREE.Object3D();
-  for (let i = 0; i < frozenCount; i++) {
-    const dr = drops[i];
-    dummy.position.set(dr.x, Math.max(0.25, Math.min(3.5, dr.y)), dr.z);
-    dummy.scale.setScalar(0.8 + Math.random() * 0.75);
-    dummy.updateMatrix();
-    frozenMesh.setMatrixAt(i, dummy.matrix);
-  }
-  frozenMesh.instanceMatrix.needsUpdate = true;
-  root.add(frozenMesh);
-};
-
-@ability: scan_room
-@match: scan & room | scan & the & room | مسح الغرفة | امسح الغرفة
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("build");
-await APP.requestRoomScan();
-const walls = APP.roomPlanes.filter(p => p.kind === "wall"), bounds = APP.roomBounds;
-const scanGroup = new THREE.Group();
-const wireMat = new THREE.MeshBasicMaterial({ color: 0x00ffaa, wireframe: true, transparent: true, opacity: 0.5 });
-
-if (walls.length) {
-  for (const w of walls) {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(w.w, w.h, 8, 6), wireMat);
-    m.position.copy(w.pos); m.quaternion.copy(w.quat);
-    m.rotateX(Math.PI / 2);
-    scanGroup.add(m);
-  }
-} else {
-  for (let i = 0; i < bounds.length; i++) {
-    const a = bounds[i], b = bounds[(i + 1) % bounds.length], len = a.distanceTo(b);
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(len, 2.5, 10, 6), wireMat);
-    m.position.set((a.x+b.x)/2, 1.25, (a.z+b.z)/2);
-    m.lookAt((a.x+b.x)/2 - (b.z-a.z), 1.25, (a.z+b.z)/2 + (b.x-a.x));
-    scanGroup.add(m);
-  }
-}
-APP.scene.add(scanGroup);
-APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
-let age = 0;
-APP.onTick("scan_vis", 3.2, (dt) => {
-  age += dt;
-  wireMat.opacity = Math.max(0, 0.5 * (1 - Math.max(0, age - 1.8) / 1.4));
-}, () => { APP.scene.remove(scanGroup); });
-APP.say("📡 تم مسح الغرفة — تصادم الجدران والنوافذ نشط");
-
-@ability: change_room_360
-@match: غير الغرفة | غير الغرفه | change & room | room
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("build");
-for (const e of APP.entities) if (e.type === "env_360" && !e.dissolveStart) APP.dissolve({ target: e.id, duration: 0.4 });
-let tex = APP.findImage("room.jpg");
-if (!tex) {
-  const cv = document.createElement("canvas"); cv.width = 2048; cv.height = 1024; const g = cv.getContext("2d");
-  const grad = g.createLinearGradient(0, 0, 0, 1024);
-  grad.addColorStop(0, "#121726"); grad.addColorStop(0.5, "#1f2b3d"); grad.addColorStop(1, "#0d1016");
-  g.fillStyle = grad; g.fillRect(0, 0, 2048, 1024);
-  g.strokeStyle = "rgba(0, 255, 170, 0.25)"; g.lineWidth = 3;
-  for (let x=0;x<=2048;x+=128){ g.beginPath(); g.moveTo(x,0); g.lineTo(x,1024); g.stroke(); }
-  for (let y=128;y<1024;y+=128){ g.beginPath(); g.moveTo(0,y); g.lineTo(2048,y); g.stroke(); }
-  tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
-}
-const root = new THREE.Group();
-root.add(new THREE.Mesh(new THREE.SphereGeometry(22, 48, 32), new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide })).translateY(1.5));
-APP.scene.add(root);
-const mxU = APP.applyDissolveShader(root, 0, 14, true);
-APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
-APP.registerEntity({ name: "360 room", type: "env_360", root, box: new THREE.Box3(new THREE.Vector3(-22,-20,-22), new THREE.Vector3(22,24,22)), matrixUniforms: mxU, buildDur: 1.6 });
-
-
-# ------------------------------------------------------------------------------
-# SPECIAL ABILITY: "الجهاز العجيب" (Quantum Dual-Chamber Hybrid Fusion Machine)
-# ------------------------------------------------------------------------------
-@ability: wonder_fusion_machine
-@match: الجهاز العجيب | جهاز عجيب | fusion & machine | wonder & machine
-@code:
-const THREE = APP.THREE;
-APP.sfx.play("build");
-
-// Remove any existing fusion machine cleanly
-for (const e of [...APP.entities]) if (e.type === "fusion_machine" && !e.dissolveStart) APP.dissolve({ target: e.id, duration: 0.35 });
-
-const sp = APP.spawnPos(1.45, 0);
-const root = new THREE.Group();
-root.position.set(sp.x, 0, sp.z);
-root.rotation.y = sp.ry;
-
-const titanium = new THREE.MeshPhysicalMaterial({ color: 0x2a3038, metalness: 0.85, roughness: 0.24, clearcoat: 0.45 });
-const darkSlate = new THREE.MeshPhysicalMaterial({ color: 0x11151a, metalness: 0.55, roughness: 0.4 });
-const glassChamberMat = new THREE.MeshPhysicalMaterial({ color: 0xdff6ff, roughness: 0.04, metalness: 0.08, clearcoat: 1.0, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
-const leftPadMat = new THREE.MeshStandardMaterial({ color: 0x00d9ff, emissive: 0x0088cc, emissiveIntensity: 1.4 });
-const rightPadMat = new THREE.MeshStandardMaterial({ color: 0xff6622, emissive: 0xcc3300, emissiveIntensity: 1.4 });
-const centerPadMat = new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00aa55, emissiveIntensity: 1.6 });
-const btnMat = new THREE.MeshPhysicalMaterial({ color: 0x00ff66, emissive: 0x00cc44, emissiveIntensity: 1.8, roughness: 0.18, clearcoat: 0.8 });
-
-// Heavy Pedestal & Main Chassis
-const base = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.78, 0.64), darkSlate);
-base.position.y = 0.39; base.castShadow = base.receiveShadow = true; root.add(base);
-const deck = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.06, 0.72), titanium);
-deck.position.y = 0.81; deck.castShadow = true; root.add(deck);
-const bridge = new THREE.Mesh(new THREE.BoxGeometry(1.76, 0.07, 0.48), titanium);
-bridge.position.set(0, 1.54, -0.04); bridge.castShadow = true; root.add(bridge);
-
-// Containment Chambers: Left (-0.62), Right (+0.62), Central Output (0)
-const makeChamber = (xPos, padMat, r = 0.24, h = 0.66) => {
-  const pad = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r, 0.04, 32), padMat);
-  pad.position.set(xPos, 0.86, 0); root.add(pad);
-  const rimTop = new THREE.Mesh(new THREE.TorusGeometry(r, 0.018, 12, 36).rotateX(Math.PI / 2), titanium);
-  rimTop.position.set(xPos, 0.86 + h, 0); root.add(rimTop);
-  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 32, 1, true), glassChamberMat);
-  cyl.position.set(xPos, 0.86 + h * 0.5, 0); root.add(cyl);
-  return { localCenter: new THREE.Vector3(xPos, 0.86 + h * 0.48, 0), pad, cyl };
-};
-const leftCh = makeChamber(-0.62, leftPadMat, 0.24, 0.65);
-const rightCh = makeChamber(0.62, rightPadMat, 0.24, 0.65);
-const centerCh = makeChamber(0, centerPadMat, 0.27, 0.68);
-
-// Energy Conduit Pipes from Left & Right to Center
-[-0.31, 0.31].forEach(cx => {
-  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.38, 12).rotateZ(Math.PI / 2), titanium);
-  pipe.position.set(cx, 1.54, 0); root.add(pipe);
-});
-
-// Scanning Laser Rings inside Chambers
-const scanRingL = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.008, 8, 32).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x00ffff }));
-const scanRingR = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.008, 8, 32).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xff8833 }));
-scanRingL.visible = scanRingR.visible = false;
-root.add(scanRingL, scanRingR);
-
-// Front Console + Interactive Green Push-Button
-const consolePod = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 0.22), titanium);
-consolePod.position.set(0, 0.83, 0.37); consolePod.rotation.x = 0.35; root.add(consolePod);
-const greenBtn = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.06, 0.04, 24), btnMat);
-greenBtn.position.set(0, 0.885, 0.39); greenBtn.rotation.x = 0.35; root.add(greenBtn);
-const btnBaseY = 0.885;
-
-const coreLight = new THREE.PointLight(0x00ff88, 0.5, 4.5);
-coreLight.position.set(0, 1.25, 0.15); root.add(coreLight);
-
-APP.scene.add(root);
-const mb = APP.computeBox(root), mxU = APP.applyDissolveShader(root, mb.min.y, mb.max.y, false);
-APP.fx.groundPulse(sp.x, sp.z, 2.2, 0x00ff88);
-
-let leftEnt = null, rightEnt = null, isFusing = false, btnPressAnim = 0;
-
-// Helper: Extract geometries & blended PBR materials to create a true 3D Hybrid!
-const buildHybridEntity = (entA, entB, spawnWorldPos) => {
-  const meshesA = [], meshesB = [];
-  const collectMeshes = (src, arr) => {
-    src.root.updateMatrixWorld(true);
-    const bSrc = APP.computeBox(src.root), cSrc = bSrc.getCenter(new THREE.Vector3());
-    const szSrc = bSrc.getSize(new THREE.Vector3()), normScale = 0.45 / Math.max(0.05, szSrc.x, szSrc.y, szSrc.z);
-    src.root.traverse(o => {
-      if (!o.isMesh || !o.geometry) return;
-      const g = o.geometry.clone();
-      g.applyMatrix4(o.matrixWorld);
-      g.translate(-cSrc.x, -cSrc.y, -cSrc.z);
-      g.scale(normScale, normScale, normScale);
-      g.computeBoundingBox();
-      const mat = Array.isArray(o.material) ? o.material[0] : o.material;
-      arr.push({ geo: g, mat, box: g.boundingBox, vol: g.boundingBox.getSize(new THREE.Vector3()).length() });
-    });
-  };
-  collectMeshes(entA, meshesA);
-  collectMeshes(entB, meshesB);
-  meshesA.sort((x, y) => y.vol - x.vol);
-  meshesB.sort((x, y) => y.vol - x.vol);
-
-  const getMatProps = (m) => ({
-    col: (m && m.color) ? m.color.clone() : new THREE.Color(0x99aabb),
-    rough: (m && m.roughness != null) ? m.roughness : 0.45,
-    metal: (m && m.metalness != null) ? m.metalness : 0.25,
-    map: (m && m.map) ? m.map : null,
-    norm: (m && m.normalMap) ? m.normalMap : null,
-    trans: !!(m && m.transparent && m.opacity < 0.9)
-  });
-  const pA = getMatProps(meshesA[0]?.mat), pB = getMatProps(meshesB[0]?.mat);
-  const env = APP.updateReflection(spawnWorldPos);
-
-  // Unified Blended Hybrid PBR Material + Complementary Accent Material
-  const hybridPrimaryMat = new THREE.MeshPhysicalMaterial({
-    color: pA.col.clone().lerp(pB.col, 0.5),
-    map: pA.map || pB.map || null,
-    normalMap: pA.norm || pB.norm || null,
-    roughness: (pA.rough + pB.rough) * 0.5,
-    metalness: Math.min(1, (pA.metal + pB.metal) * 0.55 + 0.15),
-    clearcoat: 0.68, clearcoatRoughness: 0.14,
-    envMap: env, envMapIntensity: 1.8,
-    transparent: pA.trans || pB.trans,
-    opacity: (pA.trans || pB.trans) ? 0.65 : 1.0
-  });
-  const hybridAccentMat = new THREE.MeshPhysicalMaterial({
-    color: pB.col.clone().lerp(pA.col, 0.25),
-    map: pB.map || pA.map || null,
-    roughness: Math.max(0.08, pB.rough * 0.8),
-    metalness: Math.min(1, pB.metal + 0.25),
-    emissive: new THREE.Color(0x004433), emissiveIntensity: 0.35,
-    clearcoat: 0.85, envMap: env, envMapIntensity: 2.0
-  });
-
-  const hRoot = new THREE.Group();
-  const coreA = meshesA[0], coreB = meshesB[0];
-
-  // 1. Primary Core Body from A (morph-harmonized toward B's aspect proportions)
-  if (coreA) {
-    const coreGeo = coreA.geo.clone();
-    const sA = coreA.box.getSize(new THREE.Vector3()), sB = coreB ? coreB.box.getSize(new THREE.Vector3()) : sA;
-    const rx = THREE.MathUtils.lerp(1, sB.x / Math.max(0.05, sA.x), 0.35);
-    const ry = THREE.MathUtils.lerp(1, sB.y / Math.max(0.05, sA.y), 0.35);
-    const rz = THREE.MathUtils.lerp(1, sB.z / Math.max(0.05, sA.z), 0.35);
-    coreGeo.scale(rx, ry, rz);
-    coreGeo.computeBoundingBox();
-    const coreMesh = new THREE.Mesh(coreGeo, hybridPrimaryMat);
-    coreMesh.castShadow = coreMesh.receiveShadow = true;
-    hRoot.add(coreMesh);
-
-    // 2. Graft distinctive features/appendages from B directly onto A's anatomical frame
-    const cb = coreGeo.boundingBox, cSz = cb.getSize(new THREE.Vector3());
-    const featuresB = meshesB.length > 1 ? meshesB.slice(1, 7) : [meshesB[0]];
-    featuresB.forEach((fb, idx) => {
-      if (!fb) return;
-      const fGeo = fb.geo.clone();
-      const fBox = fGeo.boundingBox, fCenter = fBox.getCenter(new THREE.Vector3());
-      fGeo.translate(-fCenter.x, -fCenter.y, -fCenter.z);
-      if (meshesB.length === 1) {
-        // Single-mesh B: clip/scale distinctive dorsal crest & lateral extensions cleanly onto A
-        fGeo.scale(0.68, 0.68, 0.68);
-        const mTop = new THREE.Mesh(fGeo, hybridAccentMat);
-        mTop.position.set(0, cb.max.y * 0.42, cb.max.z * 0.15);
-        mTop.rotation.x = -0.25;
-        mTop.castShadow = true; hRoot.add(mTop);
-      } else {
-        // Multi-mesh B: transplant B's limbs, wings, wheels, or head features into corresponding sockets on A
-        const normPos = fCenter.clone().divide(new THREE.Vector3(Math.max(0.1, sB.x), Math.max(0.1, sB.y), Math.max(0.1, sB.z)));
-        const graft = new THREE.Mesh(fGeo, idx % 2 === 0 ? hybridAccentMat : hybridPrimaryMat);
-        graft.position.set(normPos.x * cSz.x * 0.85, normPos.y * cSz.y * 0.85, normPos.z * cSz.z * 0.85);
-        graft.castShadow = true; hRoot.add(graft);
-      }
-    });
-
-    // 3. Add secondary smaller parts from A so A's recognizable silhouette details stay intact
-    meshesA.slice(1, 5).forEach((fa, idx) => {
-      const m = new THREE.Mesh(fa.geo.clone(), idx % 2 === 0 ? hybridPrimaryMat : hybridAccentMat);
-      m.castShadow = true; hRoot.add(m);
-    });
-
-    // 4. Sleek bio-mechanical fusion collar seam uniting both structures
-    const seamRing = new THREE.Mesh(
-      new THREE.TorusGeometry(Math.min(cSz.x, cSz.z) * 0.34, 0.012, 10, 32).rotateX(Math.PI / 2),
-      new THREE.MeshStandardMaterial({ color: 0x00ffaa, emissive: 0x00dd88, emissiveIntensity: 1.5, metalness: 0.9, roughness: 0.15 })
-    );
-    seamRing.position.y = cb.min.y + cSz.y * 0.45;
-    hRoot.add(seamRing);
-  }
-
-  hRoot.position.copy(spawnWorldPos);
-  APP.scene.add(hRoot);
-  const hb = APP.computeBox(hRoot), mxU = APP.applyDissolveShader(hRoot, hb.min.y, hb.max.y, false);
-  const hybridName = `${entA.name}-${entB.name} hybrid`;
-  return APP.registerEntity({
-    name: hybridName, type: "hybrid", root: hRoot, box: hb, matrixUniforms: mxU,
-    buildDur: 1.1, grabbable: true, physSpin: 0.35
-  });
-};
-
-const startFusionSequence = () => {
-  if (isFusing) return;
-  if (!leftEnt || !rightEnt) {
-    APP.say("⚠️ ضع غرضاً داخل الحجرة اليسرى وآخر في الحجرة اليمنى ثم اضغط الزر الأخضر!");
-    APP.sfx.play("delete");
-    return;
-  }
-  isFusing = true;
-  btnPressAnim = 0.35;
-  APP.say("⚛️ جاري مسح ودمج الجسمين داخل الجهاز العجيب...");
-
-  // Multi-stage Sci-Fi Audio Synthesis
-  const ctx = APP.sfx.ctx;
-  if (ctx) {
-    const t = ctx.currentTime;
-    const o1 = ctx.createOscillator(), g1 = ctx.createGain();
-    o1.type = "sawtooth"; o1.frequency.setValueAtTime(90, t); o1.frequency.exponentialRampToValueAtTime(680, t + 3.1);
-    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.setValueAtTime(300, t); lp.frequency.exponentialRampToValueAtTime(3200, t + 3.0);
-    g1.gain.setValueAtTime(0.01, t); g1.gain.linearRampToValueAtTime(0.11, t + 2.8); g1.gain.exponentialRampToValueAtTime(0.001, t + 3.6);
-    o1.connect(lp).connect(g1).connect(ctx.destination); o1.start(t); o1.stop(t + 3.7);
-  }
-
-  scanRingL.visible = scanRingR.visible = true;
-  const srcA = leftEnt, srcB = rightEnt;
-  let elapsed = 0, hybridSpawned = false, hybridEnt = null;
-  const cWorld = centerCh.localCenter.clone().applyMatrix4(root.matrixWorld);
-  const ejectWorld = new THREE.Vector3(0, 1.15, 0.68).applyMatrix4(root.matrixWorld);
-
-  APP.onTick("fusion_seq", 4.3, (dt) => {
-    elapsed += dt;
-    if (elapsed < 1.8) {
-      // Phase 1: Vertical laser scanning inside both chambers
-      const scanY = 0.9 + (0.5 + 0.5 * Math.sin(elapsed * 7.5)) * 0.55;
-      scanRingL.position.set(leftCh.localCenter.x, scanY, 0);
-      scanRingR.position.set(rightCh.localCenter.x, scanY, 0);
-      coreLight.intensity = 1.5 + Math.sin(elapsed * 14) * 0.6;
-      const lw = leftCh.localCenter.clone().applyMatrix4(root.matrixWorld);
-      const rw = rightCh.localCenter.clone().applyMatrix4(root.matrixWorld);
-      APP.fx.spawnPoint("sparks", lw.x, scanY, lw.z, 0.7, 0x00ffff);
-      APP.fx.spawnPoint("sparks", rw.x, scanY, rw.z, 0.7, 0xff7722);
-    } else if (elapsed < 3.1) {
-      // Phase 2: Pull & converge both objects into Central Output Chamber
-      scanRingL.visible = scanRingR.visible = false;
-      const k = (elapsed - 1.8) / 1.3;
-      srcA.root.position.lerp(cWorld, dt * 4.5);
-      srcB.root.position.lerp(cWorld, dt * 4.5);
-      srcA.root.rotation.y += dt * 9; srcB.root.rotation.y -= dt * 9;
-      srcA.root.scale.multiplyScalar(1 - dt * 0.85);
-      srcB.root.scale.multiplyScalar(1 - dt * 0.85);
-      coreLight.intensity = 3.2 + Math.random() * 2.0;
-      APP.fx.spawnPoint("glow", cWorld.x, cWorld.y, cWorld.z, 1.4, 0x00ff99);
-      APP.fx.spawnPoint("sparks", cWorld.x, cWorld.y, cWorld.z, 1.1, 0x44ffcc);
-    } else {
-      // Phase 3: Materialize & eject unified 3D hybrid!
-      if (!hybridSpawned) {
-        hybridSpawned = true;
-        APP.sfx.play("magic");
-        APP.fx.groundPulse(root.position.x, root.position.z, 2.5, 0x00ffaa);
-        for (let i = 0; i < 42; i++) APP.fx.spawnPoint("sparks", cWorld.x, cWorld.y, cWorld.z, 1.3, 0x00ffaa);
-        hybridEnt = buildHybridEntity(srcA, srcB, cWorld);
-        APP.removeEntity(srcA);
-        APP.removeEntity(srcB);
-        leftEnt = null; rightEnt = null;
-      }
-      if (hybridEnt && hybridEnt.root.parent) {
-        hybridEnt.root.position.lerp(ejectWorld, Math.min(1, dt * 3.8));
-      }
-      coreLight.intensity = Math.max(0.5, coreLight.intensity - dt * 2.0);
-    }
-  }, () => {
-    scanRingL.visible = scanRingR.visible = false;
-    isFusing = false;
-    APP.say("🧬 اكتمل الدمج! التقط المخلوق الهجين الجديد");
-  });
-};
-
-// Interactive Green Button click (Desktop) & VR fingertip press
-const btnWorld = new THREE.Vector3();
-const offBtnClick = APP.on("pointerdown", ev => {
-  const hits = ev.ray.intersectObject(greenBtn, false);
-  if (hits.length) { ev.handled = true; startFusionSequence(); }
-});
-
-const machineEnt = APP.registerEntity({
-  name: "wonder fusion machine", type: "fusion_machine", root, box: mb, matrixUniforms: mxU, buildDur: 1.5,
-  upd: (dt, t) => {
-    if (machineEnt.dissolveStart || dt <= 0) return;
-
-    // Button depression animation & VR fingertip press detection
-    if (btnPressAnim > 0) btnPressAnim = Math.max(0, btnPressAnim - dt);
-    greenBtn.position.y = btnBaseY - (btnPressAnim > 0 ? 0.016 : 0);
-    greenBtn.getWorldPosition(btnWorld);
-    if (!isFusing) {
-      for (const h of APP.hands) {
-        if (h.isDesk) continue;
-        if (h.tipWp.distanceTo(btnWorld) < 0.075 || h.wp.distanceTo(btnWorld) < 0.095) { startFusionSequence(); break; }
-      }
-    }
-
-    // Chamber capture & containment suspension
-    if (!isFusing) {
-      const lw = leftCh.localCenter.clone().applyMatrix4(root.matrixWorld);
-      const rw = rightCh.localCenter.clone().applyMatrix4(root.matrixWorld);
-
-      if (leftEnt && (leftEnt.heldBy || leftEnt.dissolveStart || !leftEnt.root.parent)) { leftEnt.lockedInChamber = false; leftEnt = null; }
-      if (rightEnt && (rightEnt.heldBy || rightEnt.dissolveStart || !rightEnt.root.parent)) { rightEnt.lockedInChamber = false; rightEnt = null; }
-
-      for (const e of APP.entities) {
-        if (e === machineEnt || e.dissolveStart || e.heldBy || !e.grabbable || e.lockedInChamber || e.type === "pen") continue;
-        const c = APP.computeBox(e.root).getCenter(new THREE.Vector3());
-        if (!leftEnt && c.distanceTo(lw) < 0.44) {
-          leftEnt = e; e.lockedInChamber = true;
-          const sz = APP.computeBox(e.root).getSize(new THREE.Vector3()), mx = Math.max(0.05, sz.x, sz.y, sz.z);
-          if (mx > 0.36) e.root.scale.multiplyScalar(0.36 / mx);
-          APP.sfx.play("magic"); APP.say("🔵 تم وضع الجسم الأول في الحجرة اليسرى");
-        } else if (!rightEnt && e !== leftEnt && c.distanceTo(rw) < 0.44) {
-          rightEnt = e; e.lockedInChamber = true;
-          const sz = APP.computeBox(e.root).getSize(new THREE.Vector3()), mx = Math.max(0.05, sz.x, sz.y, sz.z);
-          if (mx > 0.36) e.root.scale.multiplyScalar(0.36 / mx);
-          APP.sfx.play("magic"); APP.say("🟠 تم وضع الجسم الثاني في الحجرة اليمنى — اضغط الزر الأخضر!");
-        }
-      }
-
-      if (leftEnt) {
-        leftEnt.root.position.lerp(lw.clone().add(new THREE.Vector3(0, Math.sin(t * 2.5) * 0.025, 0)), dt * 8);
-        leftEnt.root.rotation.y += dt * 0.9;
-      }
-      if (rightEnt) {
-        rightEnt.root.position.lerp(rw.clone().add(new THREE.Vector3(0, Math.sin(t * 2.5 + 1.5) * 0.025, 0)), dt * 8);
-        rightEnt.root.rotation.y -= dt * 0.9;
-      }
-      leftPadMat.emissiveIntensity = leftEnt ? 2.6 : 1.1;
-      rightPadMat.emissiveIntensity = rightEnt ? 2.6 : 1.1;
-    }
-  },
-  dispose: () => {
-    offBtnClick();
-    if (leftEnt) leftEnt.lockedInChamber = false;
-    if (rightEnt) rightEnt.lockedInChamber = false;
-  }
-});
-APP.say("⚗️ ضع غرضاً في الحجرة اليسرى وغرضاً في اليمنى ثم اضغط الزر الأخضر!");
-
-
-# ------------------------------------------------------------------------------
-# FALLBACK: DYNAMIC BILINGUAL GLB SPAWNER ("اظهر طائرة" -> plane.glb, etc.)
-# ------------------------------------------------------------------------------
-@ability: dynamic_glb_spawner
-@fallback
-@match: اظهر | أظهر | اصنع | اريني | اعرض | هات | spawn | show | create | make
-@code:
-const file = APP.resolveGLB(text);
-await APP.spawnGLB({ file, name: file.replace(/\.(glb|gltf)$/i, ""), height: 1.4, dist: 2.2, yaw: 20 });
+const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.12, 10), brassMat); handle.rotation.z = Math.PI / 2; handle.position.set(doorW - 0.1, 
