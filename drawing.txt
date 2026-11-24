@@ -1,0 +1,1731 @@
+# ==============================================================================
+# DEVELOPER NOTE (drawing.txt):
+# Modular 3D drawing, CNC stylus/magic-wand pen, left-hand open-palm brush &
+# physics toolbar, 6 brush styles, 4 physics modes, 2D writing board,
+# AI shape classifier, and photorealistic procedural 3D shape creators.
+# Add, edit, or remove any @ability block freely without touching the HTML.
+# ==============================================================================
+
+@ability: module_pen_and_chains
+@autorun
+@code:
+const THREE = APP.THREE;
+const drawnStrokes = [];
+const activeStrokes = new Map();
+let currentPen = null;
+let currentBoard = null;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// Clean up hot-reloaded instances if abilities are re-parsed live
+if (APP._palmToolbar) { APP.scene.remove(APP._palmToolbar); APP._palmToolbar = null; }
+if (APP._penTimeTick) { APP.stopTick(APP._penTimeTick); }
+
+const brushState = {
+  style: "default", // "default" | "grass" | "metal" | "water" | "rope" | "glass" | "2d"
+  physics: "none"   // "none" | "softbody" | "rigidbody" | "cloth" | "grains"
+};
+APP._brushState = brushState;
+
+// ------------------------------------------------------------------------------
+// Procedural Micro-Bump, Rope, Water & Glass Ripple Textures
+// ------------------------------------------------------------------------------
+const mkMicroBump = (contrast = 26) => {
+  const c = document.createElement("canvas"); c.width = c.height = 256;
+  const x = c.getContext("2d"); x.fillStyle = "#808080"; x.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 4000; i++) {
+    const v = 128 + Math.floor((Math.random() - 0.5) * contrast);
+    x.fillStyle = `rgb(${v},${v},${v})`;
+    x.fillRect(Math.random() * 256, Math.random() * 256, 2, 1);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(4, 4);
+  return t;
+};
+const strokeBump = mkMicroBump(28);
+
+const ropeTex = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 256;
+  const g = c.getContext("2d");
+  g.fillStyle = "#b0824a"; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 520; i++) {
+    const x = Math.random() * 256, y = Math.random() * 256;
+    g.strokeStyle = i % 3 === 0 ? "rgba(62,38,14,0.45)" : (i % 2 === 0 ? "rgba(222,182,122,0.38)" : "rgba(128,88,42,0.42)");
+    g.lineWidth = 1.2 + Math.random() * 2.2;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + 28, y + 18); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.encoding = THREE.sRGBEncoding; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(6, 2);
+  return t;
+})();
+
+const mkWaveNormalTex = (freqX = 5, freqY = 7, amp = 0.48, repeat = 4) => {
+  const s = 256, c = document.createElement("canvas"); c.width = c.height = s;
+  const g = c.getContext("2d"), img = g.createImageData(s, s), d = img.data;
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    const u = (x / s) * Math.PI * 2 * freqX, v = (y / s) * Math.PI * 2 * freqY;
+    const nx = Math.cos(u + Math.sin(v * 0.7)) * amp;
+    const ny = Math.sin(v + Math.cos(u * 0.8)) * amp;
+    const idx = (y * s + x) * 4;
+    d[idx] = Math.floor((nx * 0.5 + 0.5) * 255);
+    d[idx + 1] = Math.floor((ny * 0.5 + 0.5) * 255);
+    d[idx + 2] = 235;
+    d[idx + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat, repeat);
+  return t;
+};
+const waterNormalTex = mkWaveNormalTex(4, 6, 0.42, 3);
+const glassRippleTex = mkWaveNormalTex(3, 3, 0.38, 2);
+
+const grassShaderUniforms = { uTime: { value: 0 }, uWind: { value: 0.65 } };
+APP._penTimeTick = "mod_pen_shared_time";
+APP.onTick(APP._penTimeTick, 0, (dt, t) => {
+  grassShaderUniforms.uTime.value = t;
+  grassShaderUniforms.uWind.value = APP.worldWind;
+  waterNormalTex.offset.x = (t * 0.14) % 1;
+  waterNormalTex.offset.y = (t * 0.09) % 1;
+}, null, true);
+
+// ------------------------------------------------------------------------------
+// Geometry & Physics Helpers
+// ------------------------------------------------------------------------------
+const extractRotation = (A, q, iters = 5) => {
+  const m = new THREE.Matrix4(), c0 = new THREE.Vector3(A[0], A[1], A[2]), c1 = new THREE.Vector3(A[3], A[4], A[5]), c2 = new THREE.Vector3(A[6], A[7], A[8]);
+  const r0 = new THREE.Vector3(), r1 = new THREE.Vector3(), r2 = new THREE.Vector3(), omg = new THREE.Vector3();
+  for (let i = 0; i < iters; i++) {
+    m.makeRotationFromQuaternion(q); m.extractBasis(r0, r1, r2);
+    omg.set(0, 0, 0).addScaledVector(r0.clone().cross(c0), 1).addScaledVector(r1.clone().cross(c1), 1).addScaledVector(r2.clone().cross(c2), 1);
+    const den = Math.abs(r0.dot(c0) + r1.dot(c1) + r2.dot(c2)) + 1e-9; omg.multiplyScalar(1 / den);
+    const w = omg.length(); if (w < 1e-7) break;
+    q.premultiply(new THREE.Quaternion().setFromAxisAngle(omg.multiplyScalar(1 / w), w)).normalize();
+  }
+};
+
+const closestSegSeg = (p1, q1, p2, q2, o1, o2) => {
+  const d1 = q1.clone().sub(p1), d2 = q2.clone().sub(p2), r = p1.clone().sub(p2), a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(r);
+  let s = 0, t = 0;
+  if (a > 1e-8 && e > 1e-8) {
+    const c = d1.dot(r), b = d1.dot(d2), den = a * e - b * b;
+    s = den !== 0 ? clamp((b * f - c * e) / den, 0, 1) : 0; t = (b * s + f) / e;
+    if (t < 0) { t = 0; s = clamp(-c / a, 0, 1); } else if (t > 1) { t = 1; s = clamp((b - c) / a, 0, 1); }
+  }
+  o1.copy(p1).addScaledVector(d1, s); o2.copy(p2).addScaledVector(d2, t); return { s, t };
+};
+
+const pointToSeg = (p, a, b, out) => {
+  const ab = b.clone().sub(a), l2 = ab.lengthSq(), t = l2 > 1e-8 ? clamp(p.clone().sub(a).dot(ab) / l2, 0, 1) : 0;
+  out.copy(a).addScaledVector(ab, t); return { dist: p.distanceTo(out), t };
+};
+
+const computeFrames = (pts) => {
+  const n = pts.length, T = [], N = [], B = [];
+  for (let i = 0; i < n; i++) {
+    const t = new THREE.Vector3();
+    if (i === 0) t.subVectors(pts[1], pts[0]);
+    else if (i === n - 1) t.subVectors(pts[n - 1], pts[n - 2]);
+    else t.subVectors(pts[i + 1], pts[i - 1]);
+    if (t.lengthSq() < 1e-10) t.set(0, 1, 0);
+    t.normalize(); T.push(t);
+  }
+  const up = Math.abs(T[0].y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const n0 = new THREE.Vector3().crossVectors(up, T[0]).normalize();
+  N.push(n0); B.push(new THREE.Vector3().crossVectors(T[0], n0).normalize());
+  const q = new THREE.Quaternion();
+  for (let i = 1; i < n; i++) {
+    q.setFromUnitVectors(T[i - 1], T[i]);
+    const ni = N[i - 1].clone().applyQuaternion(q).normalize();
+    ni.addScaledVector(T[i], -ni.dot(T[i])).normalize();
+    N.push(ni); B.push(new THREE.Vector3().crossVectors(T[i], ni).normalize());
+  }
+  return { T, N, B };
+};
+
+const writeWatertightTubeVerts = (pts, radius, radSegs, isRope, posArr) => {
+  const n = pts.length;
+  const { N, B } = computeFrames(pts);
+  const cols = radSegs + 1;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], ni = N[i], bi = B[i];
+    const endTaper = (i === 0 || i === n - 1) ? 0.55 : 1.0;
+    for (let j = 0; j < cols; j++) {
+      const ang = (j / radSegs) * Math.PI * 2;
+      const r = isRope ? radius * endTaper * (0.78 + 0.28 * Math.cos(3 * ang + i * 1.15)) : radius * endTaper;
+      const ca = Math.cos(ang) * r, sa = Math.sin(ang) * r;
+      const idx = (i * cols + j) * 3;
+      posArr[idx] = p.x + ni.x * ca + bi.x * sa;
+      posArr[idx + 1] = p.y + ni.y * ca + bi.y * sa;
+      posArr[idx + 2] = p.z + ni.z * ca + bi.z * sa;
+    }
+  }
+  // End-cap centers
+  const c0 = (n * cols) * 3, c1 = (n * cols + 1) * 3;
+  posArr[c0] = pts[0].x; posArr[c0 + 1] = pts[0].y; posArr[c0 + 2] = pts[0].z;
+  posArr[c1] = pts[n - 1].x; posArr[c1 + 1] = pts[n - 1].y; posArr[c1 + 2] = pts[n - 1].z;
+};
+
+const buildWatertightTubeGeo = (pts, radius, radSegs = 12, isRope = false) => {
+  const n = pts.length, cols = radSegs + 1;
+  const vCount = n * cols + 2;
+  const posArr = new Float32Array(vCount * 3);
+  const uvArr = new Float32Array(vCount * 2);
+  writeWatertightTubeVerts(pts, radius, radSegs, isRope, posArr);
+  for (let i = 0; i < n; i++) for (let j = 0; j < cols; j++) {
+    const k = (i * cols + j) * 2;
+    uvArr[k] = i / Math.max(1, n - 1);
+    uvArr[k + 1] = j / radSegs;
+  }
+  uvArr[(n * cols) * 2] = 0; uvArr[(n * cols) * 2 + 1] = 0.5;
+  uvArr[(n * cols + 1) * 2] = 1; uvArr[(n * cols + 1) * 2 + 1] = 0.5;
+
+  const indices = [];
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < radSegs; j++) {
+    const a = i * cols + j, b = (i + 1) * cols + j, c = (i + 1) * cols + (j + 1), d = i * cols + (j + 1);
+    indices.push(a, b, d, d, b, c);
+  }
+  const startCap = n * cols, endCap = n * cols + 1, lastRing = (n - 1) * cols;
+  for (let j = 0; j < radSegs; j++) {
+    indices.push(startCap, j + 1, j);
+    indices.push(endCap, lastRing + j, lastRing + j + 1);
+  }
+  const g = new THREE.BufferGeometry();
+  const pa = new THREE.BufferAttribute(posArr, 3); pa.setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute("position", pa);
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uvArr, 2));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  return g;
+};
+
+const writeFlatRibbonVerts = (pts, halfW, sideHint, posArr) => {
+  const n = pts.length;
+  const { T, B } = computeFrames(pts);
+  const side = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    if (sideHint) {
+      side.crossVectors(T[i], sideHint);
+      if (side.lengthSq() < 1e-6) side.copy(B[i]); else side.normalize();
+    } else side.copy(B[i]);
+    const p = pts[i], k = i * 6;
+    posArr[k] = p.x - side.x * halfW; posArr[k + 1] = p.y - side.y * halfW; posArr[k + 2] = p.z - side.z * halfW;
+    posArr[k + 3] = p.x + side.x * halfW; posArr[k + 4] = p.y + side.y * halfW; posArr[k + 5] = p.z + side.z * halfW;
+  }
+};
+
+const buildFlatRibbonGeo = (pts, halfW, sideHint = null) => {
+  const n = pts.length, posArr = new Float32Array(n * 2 * 3), uvArr = new Float32Array(n * 2 * 2), indices = [];
+  writeFlatRibbonVerts(pts, halfW, sideHint, posArr);
+  for (let i = 0; i < n; i++) {
+    const u = i / Math.max(1, n - 1);
+    uvArr[i * 4] = u; uvArr[i * 4 + 1] = 0;
+    uvArr[i * 4 + 2] = u; uvArr[i * 4 + 3] = 1;
+    if (i < n - 1) {
+      const a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  const pa = new THREE.BufferAttribute(posArr, 3); pa.setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute("position", pa);
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uvArr, 2));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  return g;
+};
+
+const buildTube = (pts, r, m) => {
+  if (pts.length < 2) return null;
+  const mesh = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), Math.min(240, Math.max(12, pts.length * 3)), r, 14, false), m);
+  mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
+};
+
+// ------------------------------------------------------------------------------
+// Brush Material & Grass Blade Builders
+// ------------------------------------------------------------------------------
+const makeBrushMaterial = (style, center, isCloth = false) => {
+  const doubleOpt = isCloth ? THREE.DoubleSide : THREE.FrontSide;
+  if (style === "metal") {
+    return new THREE.MeshPhysicalMaterial({
+      color: 0xdce6f0, metalness: 0.98, roughness: 0.08, clearcoat: 0.72,
+      envMap: APP.updateReflection(center), envMapIntensity: 2.8,
+      bumpMap: strokeBump, bumpScale: 0.0018, side: doubleOpt
+    });
+  }
+  if (style === "water") {
+    return new THREE.MeshPhysicalMaterial({
+      color: 0x3acfff, emissive: 0x05283a, emissiveIntensity: 0.35,
+      envMap: APP.updateReflection(center), envMapIntensity: 3.3,
+      normalMap: waterNormalTex, normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 0.018, metalness: 0.06, clearcoat: 1.0, clearcoatRoughness: 0.01,
+      transparent: true, opacity: isCloth ? 0.76 : 0.68, side: THREE.DoubleSide
+    });
+  }
+  if (style === "glass") {
+    return new THREE.MeshPhysicalMaterial({
+      color: 0xe6f8ff, envMap: APP.updateReflection(center), envMapIntensity: 3.8,
+      normalMap: glassRippleTex, normalScale: new THREE.Vector2(0.85, 0.85),
+      roughness: 0.01, metalness: 0.08, clearcoat: 1.0, clearcoatRoughness: 0.01,
+      iridescence: 0.58, iridescenceIOR: 1.33,
+      transparent: true, opacity: 0.36, depthWrite: false, side: THREE.DoubleSide
+    });
+  }
+  if (style === "rope") {
+    return new THREE.MeshPhysicalMaterial({
+      color: 0xffffff, map: ropeTex, bumpMap: ropeTex, bumpScale: 0.007,
+      roughness: 0.92, metalness: 0.02, sheen: 0.45, side: doubleOpt
+    });
+  }
+  if (style === "grass") {
+    return new THREE.MeshPhysicalMaterial({
+      color: isCloth ? 0x26752f : 0x204d1b,
+      bumpMap: strokeBump, bumpScale: 0.005, roughness: 0.78, sheen: 0.65, side: doubleOpt
+    });
+  }
+  if (style === "2d") {
+    return new THREE.MeshPhysicalMaterial({
+      color: 0x1ea7ff, emissive: 0x042d52, emissiveIntensity: 0.45,
+      roughness: 0.3, metalness: 0.1, clearcoat: 0.45, side: THREE.DoubleSide
+    });
+  }
+  const isDyn = brushState.physics !== "none" || !!APP._keepStrokeGravity || !!APP._nextStrokeGravity;
+  return new THREE.MeshPhysicalMaterial({
+    color: isDyn ? 0xd99b38 : 0x24c8ff,
+    emissive: isDyn ? 0x261200 : 0x002233,
+    metalness: 0.88, roughness: 0.14, clearcoat: 0.85, bumpMap: strokeBump, bumpScale: 0.0015, side: doubleOpt
+  });
+};
+
+const makeGrassBladeGeo = () => {
+  const segs = 4, pos = [], uvs = [], idx = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, w = (1 - t * 0.92) * 0.0065, y = t * 0.068, bend = t * t * 0.018;
+    pos.push(-w, y, bend, w, y, bend);
+    uvs.push(0, t, 1, t);
+    if (i < segs) { const a = i * 2, b = a + 1, c = a + 2, d = a + 3; idx.push(a, c, b, b, c, d); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+};
+const sharedGrassBladeGeo = makeGrassBladeGeo();
+
+const makeGrassInstMat = () => {
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.62, metalness: 0.04, side: THREE.DoubleSide
+  });
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = grassShaderUniforms.uTime;
+    shader.uniforms.uWind = grassShaderUniforms.uWind;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", `#include <common>\nuniform float uTime;\nuniform float uWind;`)
+      .replace("#include <begin_vertex>", `#include <begin_vertex>\nfloat sway = uv.y * uv.y * 0.018 * (0.5 + uWind);\ntransformed.x += sin(uTime * 3.2 + position.y * 22.0) * sway;\ntransformed.z += cos(uTime * 2.5 + position.x * 18.0) * sway * 0.6;`);
+  };
+  m.customProgramCacheKey = () => "grass_sway_v1";
+  return m;
+};
+
+const attachGrassBladesToPts = (parentGroup, localPts, radius) => {
+  const count = clamp(localPts.length * 6, 80, 300);
+  const inst = new THREE.InstancedMesh(sharedGrassBladeGeo, makeGrassInstMat(), count);
+  inst.userData.skipMatrixShader = true;
+  inst.castShadow = true;
+  const dummy = new THREE.Object3D(), c = new THREE.Color(), bindings = [];
+  const greens = [0x1c6324, 0x2a7d2e, 0x419c34, 0x64bf3c, 0x84d647];
+
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const fIdx = t * (localPts.length - 1), sIdx = Math.min(localPts.length - 2, Math.floor(fIdx)), frac = fIdx - sIdx;
+    const base = localPts[sIdx].clone().lerp(localPts[sIdx + 1], frac);
+    const ang = Math.random() * Math.PI * 2, rOff = radius * 0.65;
+    const off = new THREE.Vector3(Math.cos(ang) * rOff, Math.sin(ang) * rOff * 0.6 + radius * 0.2, Math.sin(ang) * rOff);
+    dummy.position.copy(base).add(off);
+    dummy.rotation.set((Math.random() - 0.5) * 0.65, Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.65);
+    const sc = 0.65 + Math.random() * 0.95;
+    dummy.scale.set(sc, sc, sc);
+    dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+    c.setHex(greens[i % greens.length]);
+    inst.setColorAt(i, c);
+    bindings.push({ sIdx, frac, off, rot: dummy.rotation.clone(), sc });
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+  parentGroup.add(inst);
+  return { inst, bindings };
+};
+
+// ------------------------------------------------------------------------------
+// High-Detail Iridescent Morpho-Monarch Butterfly & Magic Shape Creators
+// ------------------------------------------------------------------------------
+APP._spawnButterfly = (pos, scale = 0.21) => {
+  const c = document.createElement("canvas"); c.width = 512; c.height = 512; const g = c.getContext("2d");
+  const grad = g.createRadialGradient(35, 256, 15, 290, 256, 360);
+  grad.addColorStop(0, "#fff2a8"); grad.addColorStop(0.24, "#ff6a13"); grad.addColorStop(0.58, "#00a6e6"); grad.addColorStop(0.84, "#101a2e"); grad.addColorStop(1, "#09090d");
+  g.fillStyle = grad;
+  g.beginPath(); g.moveTo(0, 256);
+  g.bezierCurveTo(115, 24, 448, 16, 492, 152); g.bezierCurveTo(504, 232, 344, 256, 292, 268);
+  g.bezierCurveTo(428, 326, 392, 492, 212, 480); g.bezierCurveTo(92, 464, 24, 348, 0, 268);
+  g.closePath(); g.fill();
+  g.strokeStyle = "rgba(12,12,18,0.88)"; g.lineWidth = 7;
+  for (let i = 0; i < 7; i++) {
+    g.beginPath(); g.moveTo(10, 256);
+    g.quadraticCurveTo(220, 120 + i * 44, 460 - i * 24, 90 + i * 56);
+    g.stroke();
+  }
+  g.lineWidth = 14; g.stroke();
+  g.fillStyle = "rgba(255,255,255,0.9)";
+  for (let i = 0; i < 11; i++) { g.beginPath(); g.arc(435 - i * 16, 115 + i * 31, 6, 0, Math.PI * 2); g.fill(); }
+  const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding; tex.anisotropy = 8;
+
+  const bRoot = new THREE.Group(); bRoot.position.copy(pos);
+  const chitin = new THREE.MeshPhysicalMaterial({ color: 0x121216, roughness: 0.42, clearcoat: 0.45, bumpMap: strokeBump, bumpScale: 0.002 });
+  const thorax = new THREE.Mesh(new THREE.SphereGeometry(scale * 0.055, 14, 12), chitin); thorax.scale.set(0.75, 0.8, 1.5); bRoot.add(thorax);
+  const abd = new THREE.Mesh(new THREE.CylinderGeometry(scale * 0.036, scale * 0.018, scale * 0.34, 12), chitin); abd.rotation.x = Math.PI / 2; abd.position.z = -scale * 0.22; bRoot.add(abd);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(scale * 0.042, 12, 10), chitin); head.position.z = scale * 0.1; bRoot.add(head);
+  for (const sd of [-1, 1]) {
+    const antC = new THREE.CatmullRomCurve3([new THREE.Vector3(sd * scale * 0.015, scale * 0.02, scale * 0.12), new THREE.Vector3(sd * scale * 0.06, scale * 0.1, scale * 0.22), new THREE.Vector3(sd * scale * 0.09, scale * 0.12, scale * 0.3)]);
+    bRoot.add(new THREE.Mesh(new THREE.TubeGeometry(antC, 10, scale * 0.006, 6, false), chitin));
+  }
+  const wingMat = new THREE.MeshPhysicalMaterial({ map: tex, bumpMap: strokeBump, bumpScale: 0.003, transparent: true, alphaTest: 0.12, roughness: 0.28, iridescence: 0.92, iridescenceIOR: 1.4, sheen: 0.5, side: THREE.DoubleSide });
+  const wR = new THREE.Mesh(new THREE.PlaneGeometry(scale, scale).rotateX(-Math.PI / 2).translate(scale * 0.5, 0, 0), wingMat);
+  const wL = new THREE.Mesh(new THREE.PlaneGeometry(scale, scale).rotateX(-Math.PI / 2).scale(-1, 1, 1).translate(-scale * 0.5, 0, 0), wingMat);
+  wR.castShadow = wL.castShadow = true;
+  bRoot.add(wR, wL); APP.scene.add(bRoot);
+
+  const bb = APP.computeBox(bRoot), mxU = APP.applyDissolveShader(bRoot, bb.min.y, bb.max.y, false);
+  let phase = 0, ang = Math.random() * 6.28;
+  const home = pos.clone(), vel = new THREE.Vector3();
+  const ent = APP.registerEntity({
+    name: "butterfly", type: "butterfly", semanticTag: "wing_creature", root: bRoot, box: bb, matrixUniforms: mxU, buildDur: 0.75, grabbable: true,
+    upd: (dt, t) => {
+      if (ent.dissolveStart || ent.heldBy || dt <= 0) return;
+      let perch = null;
+      for (const h of APP.hands) if (!h.isDesk && h.isPointing && h.vel.length() < 0.35 && h.tipWp.distanceTo(bRoot.position) < 2.2) { perch = h.tipWp; break; }
+      if (perch && bRoot.position.distanceTo(perch) < 0.045) {
+        bRoot.position.lerp(perch.clone().add(new THREE.Vector3(0, 0.015, 0)), dt * 12);
+        phase += dt * 3.0;
+        wR.rotation.z = 0.26 + Math.sin(phase) * 0.18; wL.rotation.z = -wR.rotation.z;
+        return;
+      }
+      const tg = perch || new THREE.Vector3(home.x + Math.sin(ang += dt * 0.85) * 0.82, Math.max(0.7, home.y + Math.sin(t * 1.6) * 0.25), home.z + Math.cos(ang * 0.75) * 0.82);
+      vel.lerp(tg.clone().sub(bRoot.position).multiplyScalar(1.65), dt * 3);
+      bRoot.position.addScaledVector(vel, dt);
+      if (vel.lengthSq() > 0.002) bRoot.lookAt(bRoot.position.clone().add(vel));
+      phase += dt * 18.5;
+      wR.rotation.z = Math.sin(phase) * 0.92; wL.rotation.z = -wR.rotation.z;
+    }
+  });
+  return ent;
+};
+
+const mkPetalTex = () => {
+  const c = document.createElement("canvas"); c.width = c.height = 256; const g = c.getContext("2d");
+  const gr = g.createRadialGradient(128, 220, 10, 128, 128, 170);
+  gr.addColorStop(0, "#ffe4a8"); gr.addColorStop(0.25, "#e01e5a"); gr.addColorStop(0.85, "#a30837"); gr.addColorStop(1, "#6b0020");
+  g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = "rgba(255,210,220,0.18)"; g.lineWidth = 1.5;
+  for (let i = 0; i < 24; i++) { g.beginPath(); g.moveTo(128, 256); g.quadraticCurveTo(128 + (i - 12) * 8, 130, 128 + (i - 12) * 14, 0); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+};
+
+const classifyMagicStroke = (pts) => {
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(APP.camera.quaternion).setY(0).normalize();
+  if (right.lengthSq() < 0.01) right.set(1, 0, 0);
+  const up = new THREE.Vector3(0, 1, 0);
+  const proj = pts.map(p => ({ x: p.dot(right), y: p.dot(up) }));
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of proj) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+  const W = Math.max(0.05, maxX - minX), H = Math.max(0.05, maxY - minY), aspect = W / H;
+  const norm = proj.map(p => ({ x: (p.x - minX) / W, y: (p.y - minY) / H }));
+  const closeDist = Math.hypot(norm[0].x - norm[norm.length - 1].x, norm[0].y - norm[norm.length - 1].y);
+
+  let centerCross = 0, topMidDip = 1, botMidMin = 1, topEdgeMax = 0, topLeftMax = 0, topRightMax = 0, midTopMin = 1, radialPeaks = 0;
+  const rVals = norm.map(p => Math.hypot(p.x - 0.5, p.y - 0.5)), rMean = rVals.reduce((a, b) => a + b, 0) / rVals.length;
+  for (let i = 2; i < norm.length - 2; i++) {
+    const p = norm[i];
+    if (Math.abs(p.x - 0.5) < 0.1 && Math.abs(p.y - 0.5) < 0.25 && Math.sign(norm[i - 1].x - 0.5) !== Math.sign(norm[i + 1].x - 0.5)) centerCross++;
+    if (p.y > 0.5 && Math.abs(p.x - 0.5) < 0.14) topMidDip = Math.min(topMidDip, p.y);
+    if (p.y > 0.5 && Math.abs(p.x - 0.5) > 0.2) topEdgeMax = Math.max(topEdgeMax, p.y);
+    if (Math.abs(p.x - 0.5) < 0.18) botMidMin = Math.min(botMidMin, p.y);
+    if (p.x < 0.38) topLeftMax = Math.max(topLeftMax, p.y);
+    if (p.x > 0.62) topRightMax = Math.max(topRightMax, p.y);
+    if (p.x > 0.38 && p.x < 0.62 && p.y > 0.55) midTopMin = Math.min(midTopMin, p.y);
+    if (rVals[i] > rMean * 1.08 && rVals[i] > rVals[i - 1] && rVals[i] > rVals[i + 1]) radialPeaks++;
+  }
+  const topW = norm.filter(p => p.y > 0.6).reduce((a, p) => Math.max(a, Math.abs(p.x - 0.5)), 0);
+  const botW = norm.filter(p => p.y < 0.35).reduce((a, p) => Math.max(a, Math.abs(p.x - 0.5)), 0);
+
+  if (topEdgeMax - topMidDip > 0.12 && topW > botW * 1.2 && botMidMin < 0.18 && closeDist < 0.45) return "heart";
+  if (centerCross >= 2 && aspect > 0.95 && radialPeaks >= 3) return "butterfly";
+  if (radialPeaks >= 4 && aspect > 0.65 && aspect < 1.55) return "flower";
+  if (topLeftMax > 0.78 && topRightMax > 0.78 && midTopMin < Math.min(topLeftMax, topRightMax) - 0.12) return "cat";
+  if (topMidDip > 0.85 && botW > 0.32 && aspect > 0.65 && aspect < 1.5) return "house";
+  return "fish";
+};
+
+const spawnMagicCreation = async (pts) => {
+  const kind = classifyMagicStroke(pts);
+  const box = new THREE.Box3().setFromPoints(pts), center = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3()).length() * 0.55;
+  APP.sfx.play("magic");
+  APP.fx.spawnBox(box, "sparks", 42);
+  APP.say("✨ تحول الرسم إلى: " + kind);
+
+  if (kind === "fish" && APP._spawnFishFromStroke) { APP._spawnFishFromStroke(pts); return; }
+  if (kind === "butterfly") { APP._spawnButterfly(center, Math.max(0.18, Math.min(0.36, sz * 0.55))); return; }
+
+  const url = APP.findGLB(kind + ".glb");
+  if (!url.startsWith("./")) {
+    const ent = await APP.spawnGLB({ file: kind + ".glb", name: kind, height: Math.max(0.32, sz), dist: 1.5, grabbable: true });
+    ent.root.position.copy(center); return;
+  }
+
+  const root = new THREE.Group(); root.position.copy(center); root.rotation.y = Math.atan2(-APP.headFwd.x, -APP.headFwd.z);
+  const s = Math.max(0.24, Math.min(0.55, sz)), env = APP.updateReflection(center);
+
+  if (kind === "heart") {
+    const hs = new THREE.Shape();
+    hs.moveTo(0, s * 0.18); hs.bezierCurveTo(s * 0.05, s * 0.45, s * 0.48, s * 0.42, s * 0.45, s * 0.08);
+    hs.bezierCurveTo(s * 0.42, -s * 0.22, s * 0.12, -s * 0.36, 0, -s * 0.48);
+    hs.bezierCurveTo(-s * 0.12, -s * 0.36, -s * 0.42, -s * 0.22, -s * 0.45, s * 0.08);
+    hs.bezierCurveTo(-s * 0.48, s * 0.42, -s * 0.05, s * 0.45, 0, s * 0.18);
+    const hg = new THREE.ExtrudeGeometry(hs, { depth: s * 0.16, bevelEnabled: true, bevelThickness: s * 0.075, bevelSize: s * 0.06, bevelSegments: 10 }); hg.center();
+    const hMesh = new THREE.Mesh(hg, new THREE.MeshPhysicalMaterial({
+      color: 0xb80828, emissive: 0x260008, envMap: env, envMapIntensity: 3.4,
+      metalness: 0.92, roughness: 0.03, clearcoat: 1.0, clearcoatRoughness: 0.02
+    }));
+    root.add(hMesh);
+  } else if (kind === "flower") {
+    const green = new THREE.MeshPhysicalMaterial({ color: 0x164d24, roughness: 0.48, bumpMap: strokeBump, bumpScale: 0.002, clearcoat: 0.22 });
+    const stem = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([new THREE.Vector3(0,-s*0.68,0), new THREE.Vector3(s*0.04,-s*0.32,s*0.02), new THREE.Vector3(0,0,0)]), 18, s*0.022, 12, false), green);
+    root.add(stem);
+    for (const sd of [-1, 1]) {
+      const lfGeo = new THREE.SphereGeometry(s * 0.14, 14, 10); lfGeo.scale(1.6, 0.12, 0.72);
+      const lf = new THREE.Mesh(lfGeo, green); lf.position.set(sd * s * 0.14, -s * 0.34, 0); lf.rotation.z = sd * 0.48; root.add(lf);
+    }
+    const petalTex = mkPetalTex();
+    const petalMat = new THREE.MeshPhysicalMaterial({ map: petalTex, bumpMap: strokeBump, bumpScale: 0.002, roughness: 0.35, sheen: 0.9, sheenColor: new THREE.Color(0xff99bb), clearcoat: 0.18, side: THREE.DoubleSide });
+    const head = new THREE.Group(); head.rotation.x = 0.42;
+    head.add(new THREE.Mesh(new THREE.SphereGeometry(s * 0.085, 16, 12), new THREE.MeshStandardMaterial({ color: 0xe8a825, roughness: 0.85, bumpMap: strokeBump, bumpScale: 0.005 })));
+    for (let ring = 0; ring < 2; ring++) {
+      const n = ring === 0 ? 7 : 10, sc = ring === 0 ? 0.8 : 1.08, tilt = ring === 0 ? -0.58 : -0.26;
+      for (let i = 0; i < n; i++) {
+        const pGeo = new THREE.SphereGeometry(s * 0.15 * sc, 16, 14); pGeo.scale(0.65, 0.07, 1.5); pGeo.translate(0, 0, s * 0.19 * sc);
+        const pet = new THREE.Mesh(pGeo, petalMat); pet.rotation.y = (i / n) * Math.PI * 2 + ring * 0.32; pet.rotation.x = tilt;
+        head.add(pet);
+      }
+    }
+    root.add(head);
+  } else {
+    const gltf = await new Promise((res, rej) => APP.gltfLoader.load("./" + kind + ".glb", res, undefined, rej)).catch(() => null);
+    if (gltf) {
+      const m = APP.SkeletonUtils.clone(gltf.scene);
+      const b0 = APP.computeBox(m), mx = Math.max(0.01, b0.getSize(new THREE.Vector3()).y);
+      m.scale.setScalar(s / mx); root.add(m);
+    } else if (kind === "house") {
+      const stone = new THREE.MeshStandardMaterial({ color: 0x7d7770, roughness: 0.88, bumpMap: strokeBump, bumpScale: 0.008 });
+      const timber = new THREE.MeshPhysicalMaterial({ color: 0x452b19, roughness: 0.55, bumpMap: strokeBump, bumpScale: 0.004 });
+      const slate = new THREE.MeshStandardMaterial({ color: 0x333942, roughness: 0.65, bumpMap: strokeBump, bumpScale: 0.005 });
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(s * 0.72, s * 0.44, s * 0.62), stone); wall.position.y = -s * 0.1; root.add(wall);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(s * 0.58, s * 0.36, 4), slate); roof.rotation.y = Math.PI / 4; roof.position.y = s * 0.3; root.add(roof);
+      const door = new THREE.Mesh(new THREE.BoxGeometry(s * 0.15, s * 0.27, s * 0.03), timber); door.position.set(0, -s * 0.18, s * 0.31); root.add(door);
+      const winM = new THREE.MeshPhysicalMaterial({ color: 0xffe49e, emissive: 0xffaa33, emissiveIntensity: 1.5, roughness: 0.1, clearcoat: 1 });
+      [-1, 1].forEach(sd => { const w = new THREE.Mesh(new THREE.BoxGeometry(s * 0.12, s * 0.12, s * 0.03), winM); w.position.set(sd * s * 0.21, -s * 0.05, s * 0.31); root.add(w); });
+      const ch = new THREE.Mesh(new THREE.BoxGeometry(s * 0.1, s * 0.24, s * 0.1), stone); ch.position.set(s * 0.18, s * 0.33, -s * 0.1); root.add(ch);
+    } else {
+      const obs = new THREE.MeshPhysicalMaterial({ color: 0x242126, roughness: 0.38, sheen: 0.75, bumpMap: strokeBump, bumpScale: 0.003 });
+      const eyeM = new THREE.MeshPhysicalMaterial({ color: 0x22ff77, emissive: 0x0a441a, roughness: 0.05, clearcoat: 1 });
+      const bd = new THREE.Mesh(new THREE.SphereGeometry(s * 0.22, 18, 16), obs); bd.scale.set(0.85, 1.25, 0.95); bd.position.y = -s * 0.16; root.add(bd);
+      const hd = new THREE.Mesh(new THREE.SphereGeometry(s * 0.17, 18, 16), obs); hd.position.set(0, s * 0.16, s * 0.04); root.add(hd);
+      for (const sd of [-1, 1]) {
+        const er = new THREE.Mesh(new THREE.ConeGeometry(s * 0.068, s * 0.15, 10), obs); er.position.set(sd * s * 0.1, s * 0.33, s * 0.03); er.rotation.z = -sd * 0.24; root.add(er);
+        const ey = new THREE.Mesh(new THREE.SphereGeometry(s * 0.03, 10, 8), eyeM); ey.position.set(sd * s * 0.07, s * 0.19, s * 0.19); root.add(ey);
+      }
+      const tailC = new THREE.CatmullRomCurve3([new THREE.Vector3(0,-s*0.34,-s*0.14), new THREE.Vector3(s*0.14,-s*0.24,-s*0.26), new THREE.Vector3(s*0.16,-s*0.02,-s*0.22)]);
+      root.add(new THREE.Mesh(new THREE.TubeGeometry(tailC, 14, s * 0.03, 8, false), obs));
+    }
+  }
+
+  root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  APP.scene.add(root);
+  const b = APP.computeBox(root), mxU = APP.applyDissolveShader(root, b.min.y, b.max.y, false);
+  APP.registerEntity({ name: kind, type: "magic_shape", root, box: b, matrixUniforms: mxU, buildDur: 1.0, grabbable: true });
+};
+
+// ------------------------------------------------------------------------------
+// Interactive 2D Drafting / Whiteboard
+// ------------------------------------------------------------------------------
+const BOARD_INKS = ["#0f172a", "#1d4ed8", "#dc2626", "#059669", "#7c3aed"];
+
+APP._spawn2DBoard = () => {
+  APP.sfx.play("build");
+  if (currentBoard && !currentBoard.dissolveStart) {
+    if (currentBoard.handleEnt && !currentBoard.handleEnt.dissolveStart) APP.dissolve({ target: currentBoard.handleEnt.id, duration: 0.3 });
+    APP.dissolve({ target: currentBoard.id, duration: 0.3 });
+  }
+
+  const W = 1.14, H = 0.74, CW = 1024, CH = 664;
+  const sp = APP.spawnPos(1.08, 0);
+  const posY = Math.max(1.18, APP.headPos.y - 0.12);
+
+  // Separate top grab handle entity so writing on the board surface never accidentally grabs it!
+  const handleRoot = new THREE.Group();
+  handleRoot.position.set(sp.x, posY + H * 0.5 + 0.055, sp.z);
+  handleRoot.rotation.y = sp.ry;
+  const handleMat = new THREE.MeshPhysicalMaterial({ color: 0x1e293b, metalness: 0.75, roughness: 0.25, clearcoat: 0.5 });
+  const gripBar = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.042, 0.036), handleMat);
+  gripBar.castShadow = true;
+  handleRoot.add(gripBar);
+  const gripGlow = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.008, 0.04), new THREE.MeshBasicMaterial({ color: 0x00ffaa }));
+  handleRoot.add(gripGlow);
+  APP.scene.add(handleRoot);
+  const hb = APP.computeBox(handleRoot), hMx = APP.applyDissolveShader(handleRoot, hb.min.y, hb.max.y, false);
+  const handleEnt = APP.registerEntity({
+    name: "board handle", type: "board_handle", root: handleRoot, box: hb, matrixUniforms: hMx, buildDur: 0.45, grabbable: true
+  });
+
+  // Main Board Root
+  const root = new THREE.Group();
+  root.position.set(sp.x, posY, sp.z);
+  root.rotation.y = sp.ry;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = CW; canvas.height = CH;
+  const ctx = canvas.getContext("2d");
+
+  const drawCleanBoardBg = () => {
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillRect(0, 0, CW, CH);
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.055)";
+    ctx.lineWidth = 1.5;
+    for (let x = 0; x <= CW; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CH); ctx.stroke(); }
+    for (let y = 0; y <= CH; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CW, y); ctx.stroke(); }
+    ctx.strokeStyle = "rgba(14, 165, 233, 0.16)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(14, 14, CW - 28, CH - 28);
+  };
+  drawCleanBoardBg();
+
+  const boardTex = new THREE.CanvasTexture(canvas);
+  boardTex.encoding = THREE.sRGBEncoding;
+  boardTex.anisotropy = 8;
+
+  const alumMat = new THREE.MeshPhysicalMaterial({ color: 0x262e38, metalness: 0.88, roughness: 0.24, clearcoat: 0.4, bumpMap: strokeBump, bumpScale: 0.0015 });
+  const backing = new THREE.Mesh(new THREE.BoxGeometry(W + 0.04, H + 0.04, 0.018), alumMat);
+  backing.castShadow = backing.receiveShadow = true;
+  root.add(backing);
+
+  const surfaceMat = new THREE.MeshPhysicalMaterial({ map: boardTex, roughness: 0.18, metalness: 0.02, clearcoat: 0.48, clearcoatRoughness: 0.12 });
+  const surfaceMesh = new THREE.Mesh(new THREE.PlaneGeometry(W, H), surfaceMat);
+  surfaceMesh.position.z = 0.011;
+  surfaceMesh.receiveShadow = true;
+  root.add(surfaceMesh);
+
+  // Bezel mini-buttons along the bottom frame
+  const mkFrameBtn = (x, label, accent, action) => {
+    const bc = document.createElement("canvas"); bc.width = 220; bc.height = 72;
+    const bg = bc.getContext("2d");
+    bg.fillStyle = "#0f172a"; bg.fillRect(0, 0, 220, 72);
+    bg.strokeStyle = accent; bg.lineWidth = 4; bg.strokeRect(3, 3, 214, 66);
+    bg.fillStyle = "#f8fafc"; bg.font = "bold 28px system-ui, sans-serif";
+    bg.textAlign = "center"; bg.textBaseline = "middle";
+    bg.fillText(label, 110, 36);
+    const bt = new THREE.CanvasTexture(bc); bt.encoding = THREE.sRGBEncoding;
+    const bm = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.058), new THREE.MeshBasicMaterial({ map: bt }));
+    bm.position.set(x, -H * 0.5 - 0.048, 0.012);
+    root.add(bm);
+    return { mesh: bm, action, tex: bt };
+  };
+
+  let colorIdx = 0;
+  const frameButtons = [
+    mkFrameBtn(-0.24, "🧹 Clear", "#38bdf8", () => { drawCleanBoardBg(); boardTex.needsUpdate = true; APP.sfx.play("click"); APP.say("🧹 تم مسح السبورة"); }),
+    mkFrameBtn(0.0, "🎨 Ink", "#a78bfa", () => { colorIdx = (colorIdx + 1) % BOARD_INKS.length; APP.sfx.play("click"); APP.say("🎨 لون القلم: " + BOARD_INKS[colorIdx]); }),
+    mkFrameBtn(0.24, "✕ Close", "#fb7185", () => {
+      APP.sfx.play("delete");
+      if (!handleEnt.dissolveStart) APP.dissolve({ target: handleEnt.id, duration: 0.45 });
+      if (!boardEnt.dissolveStart) APP.dissolve({ target: boardEnt.id, duration: 0.45 });
+    })
+  ];
+
+  APP.scene.add(root);
+  const bb = APP.computeBox(root), mxU = APP.applyDissolveShader(root, bb.min.y, bb.max.y, false);
+  APP.fx.groundPulse(sp.x, sp.z, 1.3, 0x38bdf8);
+
+  const lastInputPts = new Map();
+  const paintAtLocal = (inputKey, lx, ly) => {
+    const px = clamp((lx / W + 0.5) * CW, 4, CW - 4);
+    const py = clamp((0.5 - ly / H) * CH, 4, CH - 4);
+    const prev = lastInputPts.get(inputKey);
+    const style = brushState.style;
+    const ink = BOARD_INKS[colorIdx];
+
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    if (style === "grass") {
+      ctx.strokeStyle = "#15803d"; ctx.lineWidth = 8;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      for (let i = 0; i < 4; i++) {
+        ctx.strokeStyle = i % 2 === 0 ? "#22c55e" : "#4ade80"; ctx.lineWidth = 2.2;
+        ctx.beginPath(); ctx.moveTo(px + (Math.random() - 0.5) * 10, py + (Math.random() - 0.5) * 6);
+        ctx.lineTo(px + (Math.random() - 0.5) * 18, py - 8 - Math.random() * 14); ctx.stroke();
+      }
+    } else if (style === "metal") {
+      ctx.strokeStyle = "#475569"; ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 3.5;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+    } else if (style === "water") {
+      ctx.strokeStyle = "rgba(14, 165, 233, 0.35)"; ctx.lineWidth = 16;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      ctx.strokeStyle = "rgba(224, 242, 254, 0.7)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+    } else if (style === "rope") {
+      ctx.strokeStyle = "#78350f"; ctx.lineWidth = 11;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      ctx.strokeStyle = "#d97706"; ctx.lineWidth = 5; ctx.setLineDash([7, 5]);
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      ctx.setLineDash([]);
+    } else if (style === "glass") {
+      ctx.strokeStyle = "rgba(6, 182, 212, 0.38)"; ctx.lineWidth = 14;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)"; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+    } else {
+      ctx.strokeStyle = ink; ctx.lineWidth = 6.5;
+      ctx.beginPath(); ctx.moveTo(prev ? prev.x : px, prev ? prev.y : py); ctx.lineTo(px, py); ctx.stroke();
+    }
+
+    lastInputPts.set(inputKey, { x: px, y: py });
+    boardTex.needsUpdate = true;
+  };
+
+  const resetStroke = (inputKey) => lastInputPts.delete(inputKey);
+
+  const boardEnt = APP.registerEntity({
+    name: "2d board", type: "board_2d", root, box: bb, matrixUniforms: mxU, buildDur: 0.6, grabbable: false,
+    handleEnt,
+    boardData: { W, H, surfaceMesh, frameButtons, paintAtLocal, resetStroke },
+    upd: () => {
+      if (boardEnt.dissolveStart) return;
+      if (handleEnt && !handleEnt.dissolveStart && handleEnt.root.parent) {
+        handleEnt.root.updateMatrixWorld(true);
+        const offset = new THREE.Vector3(0, -(H * 0.5 + 0.055), 0).applyQuaternion(handleEnt.root.quaternion);
+        root.position.copy(handleEnt.root.position).add(offset);
+        root.quaternion.copy(handleEnt.root.quaternion);
+      }
+      // Direct finger-tip touch writing when right hand touches the board surface
+      for (const h of APP.hands) {
+        if (h.isDesk || !h.handTrackingActive) continue;
+        if (currentPen && currentPen.heldBy === h) continue; // handled by pen tip!
+        const loc = root.worldToLocal(h.tipWp.clone());
+        if (Math.abs(loc.z - 0.011) < 0.036 && Math.abs(loc.x) <= W * 0.5 && Math.abs(loc.y) <= H * 0.5) {
+          paintAtLocal("finger_" + h.side, loc.x, loc.y);
+        } else {
+          resetStroke("finger_" + h.side);
+        }
+      }
+    },
+    dispose: () => {
+      boardTex.dispose();
+      frameButtons.forEach(fb => fb.tex.dispose());
+      if (handleEnt && handleEnt.root.parent && !handleEnt.dissolveStart) APP.removeEntity(handleEnt);
+      if (currentBoard === boardEnt) currentBoard = null;
+    }
+  });
+
+  currentBoard = boardEnt;
+  APP.say("📋 تم إحضار سبورة الكتابة 2D — اكتب بالقلم أو بالإصبع أو بالليزر");
+  return boardEnt;
+};
+
+// ------------------------------------------------------------------------------
+// Stroke Finishing & 4 Physics Engines (Rigidbody, Softbody, Cloth, Grains)
+// ------------------------------------------------------------------------------
+const collideSphereWithScene = (p, vel, radius, bounciness = 0.25) => {
+  if (p.y < radius) {
+    p.y = radius;
+    if (vel && vel.y < 0) vel.y = -vel.y * bounciness;
+    if (vel) { vel.x *= 0.85; vel.z *= 0.85; }
+  }
+  const walls = APP.roomPlanes.filter(w => w.kind === "wall");
+  for (const w of walls) {
+    const n = w.normal.clone();
+    if (n.dot(APP.headPos.clone().sub(w.pos)) < 0) n.negate();
+    const local = p.clone().sub(w.pos).applyQuaternion(w.quat.clone().invert());
+    if (Math.abs(local.x) < w.w * 0.58 && Math.abs(local.z) < w.h * 0.58) {
+      const signed = p.clone().sub(w.pos).dot(n);
+      if (signed < radius && signed > -0.6) {
+        p.addScaledVector(n, radius - signed);
+        if (vel) {
+          const vn = vel.dot(n);
+          if (vn < 0) vel.addScaledVector(n, -(1 + bounciness) * vn);
+        }
+      }
+    }
+  }
+  if (APP._phys && APP._phys.bodies) {
+    for (const pb of APP._phys.bodies) {
+      if (!pb.ent.root.parent || pb.ent.dissolveStart) continue;
+      const bc = APP.computeBox(pb.ent.root).getCenter(new THREE.Vector3());
+      const mD = radius + pb.radius * 0.9;
+      const dx = p.x - bc.x, dy = p.y - bc.y, dz = p.z - bc.z, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < mD * mD && d2 > 1e-8) {
+        const d = Math.sqrt(d2), push = (mD - d) / d;
+        p.x += dx * push; p.y += dy * push; p.z += dz * push;
+      }
+    }
+  }
+};
+
+const createBrushStrokeMesh = (localPts, radius, style, center, viewNormal) => {
+  const grp = new THREE.Group();
+  let mainMesh = null, grassData = null, isRibbon = false, isRope = false;
+  const mat = makeBrushMaterial(style, center, false);
+
+  if (style === "2d") {
+    isRibbon = true;
+    const g = buildFlatRibbonGeo(localPts, radius * 1.45, viewNormal);
+    mainMesh = new THREE.Mesh(g, mat);
+    mainMesh.castShadow = mainMesh.receiveShadow = true;
+    grp.add(mainMesh);
+  } else if (style === "rope") {
+    isRope = true;
+    const g = buildWatertightTubeGeo(localPts, radius * 1.15, 12, true);
+    mainMesh = new THREE.Mesh(g, mat);
+    mainMesh.castShadow = mainMesh.receiveShadow = true;
+    grp.add(mainMesh);
+  } else if (style === "grass") {
+    const g = buildWatertightTubeGeo(localPts, radius * 0.55, 10, false);
+    mainMesh = new THREE.Mesh(g, mat);
+    mainMesh.castShadow = mainMesh.receiveShadow = true;
+    grp.add(mainMesh);
+    grassData = attachGrassBladesToPts(grp, localPts, radius * 0.6);
+  } else {
+    const g = buildWatertightTubeGeo(localPts, radius, 14, false);
+    mainMesh = new THREE.Mesh(g, mat);
+    mainMesh.castShadow = mainMesh.receiveShadow = true;
+    grp.add(mainMesh);
+  }
+  return { grp, mainMesh, grassData, isRibbon, isRope, mat };
+};
+
+const finishClothStroke = (pts, style) => {
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const nx = clamp(Math.round(curve.getLength() / 0.06), 10, 30);
+  const ny = 6, N = nx * ny;
+  const P = new Float32Array(N * 3), Q = new Float32Array(N * 3);
+  const ribbonW = 0.26;
+  const spine = [];
+  for (let i = 0; i < nx; i++) spine.push(curve.getPointAt(i / (nx - 1)));
+  const { B } = computeFrames(spine);
+  const viewFwd = APP.headFwd.clone().normalize();
+
+  for (let j = 0; j < ny; j++) {
+    const vFrac = j / (ny - 1) - 0.5;
+    for (let i = 0; i < nx; i++) {
+      const idx = j * nx + i;
+      const side = new THREE.Vector3().crossVectors(spine[Math.min(nx - 1, i + 1)].clone().sub(spine[Math.max(0, i - 1)]), viewFwd);
+      if (side.lengthSq() < 1e-4) side.copy(B[i]); else side.normalize();
+      const px = spine[i].x + side.x * vFrac * ribbonW;
+      const py = spine[i].y + side.y * vFrac * ribbonW;
+      const pz = spine[i].z + side.z * vFrac * ribbonW;
+      P[idx * 3] = Q[idx * 3] = px;
+      P[idx * 3 + 1] = Q[idx * 3 + 1] = py;
+      P[idx * 3 + 2] = Q[idx * 3 + 2] = pz;
+    }
+  }
+
+  const C = [], addC = (p, q, s) => C.push({ a: p, b: q, d: Math.hypot(P[p*3]-P[q*3], P[p*3+1]-P[q*3+1], P[p*3+2]-P[q*3+2]), s });
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const n = j * nx + i;
+    if (i < nx - 1) addC(n, n + 1, 1);
+    if (j < ny - 1) addC(n, n + nx, 1);
+    if (i < nx - 1 && j < ny - 1) { addC(n, n + nx + 1, 0.7); addC(n + 1, n + nx, 0.7); }
+    if (i < nx - 2) addC(n, n + 2, 0.28);
+    if (j < ny - 2) addC(n, n + 2 * nx, 0.28);
+  }
+
+  const geom = new THREE.BufferGeometry(), uvs = [], idx = [];
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    uvs.push(i / (nx - 1), 1 - j / (ny - 1));
+    if (i < nx - 1 && j < ny - 1) { const n = j * nx + i; idx.push(n, n + nx, n + 1, n + 1, n + nx, n + nx + 1); }
+  }
+  const posAttr = new THREE.BufferAttribute(P, 3); posAttr.setUsage(THREE.DynamicDrawUsage);
+  geom.setAttribute("position", posAttr);
+  geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(idx);
+  geom.computeVertexNormals();
+
+  const box = new THREE.Box3().setFromPoints(spine);
+  const center = box.getCenter(new THREE.Vector3());
+  const mat = makeBrushMaterial(style === "default" ? "2d" : style, center, true);
+  mat.side = THREE.DoubleSide;
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+  APP.scene.add(mesh);
+
+  const mxU = APP.applyDissolveShader(mesh, box.min.y - 1, box.max.y + 1, false);
+  mxU.uProg.value = 1;
+  let frame = 0;
+  const clothEnt = APP.registerEntity({
+    name: style + " cloth", type: "cloth", root: mesh, box, matrixUniforms: mxU, buildDur: 0.05, grabbable: false,
+    clothData: { P, Q, N, nx, ny },
+    upd: (dt, t) => {
+      if (clothEnt.dissolveStart || dt <= 0) return;
+      const sub = 2, h = Math.min(dt, 0.032) / sub, grav = (APP.worldG * 0.45) * h * h;
+      const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart), tk = tank ? tank.tankData : null;
+      const pinnedIdx = new Map();
+      for (const hd of APP.hands) {
+        if (!hd.clothGrab || hd.clothGrab.flag !== clothEnt) continue;
+        const gp = hd.clothGrab.useTip ? hd.tipWp : hd.wp;
+        for (const gi of hd.clothGrab.nodes) pinnedIdx.set(gi.idx, { x: gp.x + gi.ox, y: gp.y + gi.oy, z: gp.z + gi.oz, w: gi.w });
+      }
+      const pTmp = new THREE.Vector3();
+      for (let s = 0; s < sub; s++) {
+        for (let i = 0; i < N; i++) {
+          const k = i * 3, pin = pinnedIdx.get(i);
+          if (pin && pin.w >= 0.99) { Q[k]=P[k]; Q[k+1]=P[k+1]; Q[k+2]=P[k+2]; P[k]=pin.x; P[k+1]=pin.y; P[k+2]=pin.z; continue; }
+          const vx = (P[k] - Q[k]) * 0.992, vy = (P[k + 1] - Q[k + 1]) * 0.992, vz = (P[k + 2] - Q[k + 2]) * 0.992;
+          Q[k] = P[k]; Q[k + 1] = P[k + 1]; Q[k + 2] = P[k + 2];
+          const wx = (0.7 + Math.sin(t * 2.5 + P[k] * 2.6 + P[k + 2] * 2.1)) * APP.worldWind * h * h;
+          const wz = Math.cos(t * 2.1 + P[k + 1] * 2.5) * (APP.worldWind * 0.65) * h * h;
+          P[k] += vx + wx; P[k + 1] += vy + grav; P[k + 2] += vz + wz;
+          if (pin) { P[k] += (pin.x - P[k]) * pin.w; P[k + 1] += (pin.y - P[k + 1]) * pin.w; P[k + 2] += (pin.z - P[k + 2]) * pin.w; }
+        }
+        for (let it = 0; it < 5; it++) {
+          for (let m = 0; m < C.length; m++) {
+            const c = C[m], pA = pinnedIdx.get(c.a), pB = pinnedIdx.get(c.b);
+            const wa = (pA && pA.w >= 0.99) ? 0 : 0.5, wb = (pB && pB.w >= 0.99) ? 0 : 0.5, tot = wa + wb;
+            if (tot <= 0) continue;
+            const p = c.a * 3, q = c.b * 3, dx = P[q] - P[p], dy = P[q + 1] - P[p + 1], dz = P[q + 2] - P[p + 2];
+            const dist = Math.hypot(dx, dy, dz) || 1e-6, diff = ((dist - c.d) / dist) * c.s / (tot * 2);
+            P[p] += dx * diff * wa; P[p + 1] += dy * diff * wa; P[p + 2] += dz * diff * wa;
+            P[q] -= dx * diff * wb; P[q + 1] -= dy * diff * wb; P[q + 2] -= dz * diff * wb;
+          }
+          if (it % 2 === 1) {
+            for (let i = 0; i < N; i++) {
+              const k = i * 3;
+              if (P[k + 1] < 0.015) { P[k + 1] = 0.015; Q[k] += (P[k] - Q[k]) * 0.25; Q[k + 2] += (P[k + 2] - Q[k + 2]) * 0.25; }
+              if (tk && Math.abs(P[k] - tk.cx) < tk.halfW && Math.abs(P[k + 2] - tk.cz) < tk.halfD && P[k + 1] < tk.waterY) {
+                P[k + 1] += (tk.waterY - P[k + 1]) * 0.25;
+                if (i % 12 === 0 && Math.random() < 0.05 && APP._splashWater) APP._splashWater(P[k], P[k + 2], 0.004, false);
+              }
+              for (const hd of APP.hands) {
+                if (hd.isDesk && !hd.act) continue;
+                for (const hp of [hd.wp, hd.tipWp]) {
+                  const dx = P[k] - hp.x, dy = P[k + 1] - hp.y, dz = P[k + 2] - hp.z, d2 = dx * dx + dy * dy + dz * dz, rr = 0.065;
+                  if (d2 < rr * rr && d2 > 1e-7) { const d = Math.sqrt(d2), ps = (rr - d) / d; P[k] += dx * ps; P[k + 1] += dy * ps; P[k + 2] += dz * ps; }
+                }
+              }
+              if (s === 0 && it === 1 && i % 2 === 0) {
+                pTmp.set(P[k], P[k + 1], P[k + 2]);
+                collideSphereWithScene(pTmp, null, 0.018, 0.2);
+                P[k] = pTmp.x; P[k + 1] = pTmp.y; P[k + 2] = pTmp.z;
+              }
+            }
+          }
+        }
+      }
+      posAttr.needsUpdate = true;
+      if (frame++ % 2 === 0) {
+        geom.computeVertexNormals(); geom.computeBoundingSphere();
+        let mn = Infinity, mx = -Infinity;
+        for (let i = 0; i < N; i++) { const y = P[i * 3 + 1]; if (y < mn) mn = y; if (y > mx) mx = y; }
+        mxU.uMinY.value = mn; mxU.uMaxY.value = Math.max(mn + 0.2, mx);
+      }
+    }
+  });
+};
+
+const finishGrainsStroke = (pts, style) => {
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const count = clamp(Math.round(curve.getLength() * 190), 120, 360);
+  const grains = [];
+  for (let i = 0; i < count; i++) {
+    const base = curve.getPointAt(i / Math.max(1, count - 1));
+    grains.push({
+      p: base.add(new THREE.Vector3((Math.random() - 0.5) * 0.035, (Math.random() - 0.5) * 0.035, (Math.random() - 0.5) * 0.035)),
+      v: new THREE.Vector3((Math.random() - 0.5) * 0.22, Math.random() * 0.15, (Math.random() - 0.5) * 0.22),
+      r: 0.015 + Math.random() * 0.008
+    });
+  }
+  const box = new THREE.Box3().setFromPoints(pts), center = box.getCenter(new THREE.Vector3());
+  const geo = style === "glass" || style === "grass" ? new THREE.OctahedronGeometry(0.018, 0) : new THREE.IcosahedronGeometry(0.018, 1);
+  const mat = makeBrushMaterial(style === "default" ? "rope" : style, center, false);
+  const inst = new THREE.InstancedMesh(geo, mat, grains.length);
+  inst.userData.skipMatrixShader = true;
+  inst.castShadow = inst.receiveShadow = true;
+  const root = new THREE.Group(); root.add(inst); APP.scene.add(root);
+  const dummy = new THREE.Object3D();
+
+  APP.registerEntity({
+    name: style + " grains", type: "snow", _isSnow: true, root, box, buildDur: 0.05,
+    upd: (dt) => {
+      if (dt <= 0) return;
+      const h = Math.min(dt, 0.028);
+      const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart), tk = tank ? tank.tankData : null;
+      const blasts = [];
+      for (const hd of APP.hands) if (hd.act && hd.pokeHit) blasts.push({ pt: hd.pokeHit.point, r: 0.25, force: 3.2 });
+
+      for (let i = 0; i < grains.length; i++) {
+        const a = grains[i];
+        a.v.y += APP.worldG * h;
+        a.p.addScaledVector(a.v, h);
+        APP.phys.collidePoint(a.p, a.r, a.v, 0.22, 0.78);
+        collideSphereWithScene(a.p, a.v, a.r, 0.22);
+
+        for (const bl of blasts) {
+          const d = a.p.distanceTo(bl.pt);
+          if (d < bl.r) {
+            const out = a.p.clone().sub(bl.pt).normalize();
+            a.v.addScaledVector(out, bl.force * (1 - d / bl.r) * h * 15).add(new THREE.Vector3(0, 1.4 * h, 0));
+          }
+        }
+        for (let j = i + 1; j < grains.length; j += 2) {
+          const b = grains[j], dx = a.p.x - b.p.x, dy = a.p.y - b.p.y, dz = a.p.z - b.p.z;
+          const d2 = dx * dx + dy * dy + dz * dz, md = a.r + b.r;
+          if (d2 < md * md && d2 > 1e-7) {
+            const d = Math.sqrt(d2), push = (md - d) / d * 0.45;
+            a.p.x += dx * push; a.p.y += dy * push; a.p.z += dz * push;
+            b.p.x -= dx * push; b.p.y -= dy * push; b.p.z -= dz * push;
+            a.v.lerp(b.v, 0.08);
+          }
+        }
+        if (tk && Math.abs(a.p.x - tk.cx) < tk.halfW && Math.abs(a.p.z - tk.cz) < tk.halfD && a.p.y < tk.waterY) {
+          a.p.y = tk.waterY; a.v.y = 0.04; a.v.x *= 0.85; a.v.z *= 0.85;
+          if (Math.random() < 0.03 && APP._splashWater) APP._splashWater(a.p.x, a.p.z, 0.004, false);
+        }
+        dummy.position.copy(a.p); dummy.scale.setScalar(a.r / 0.018); dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+    }
+  });
+};
+
+const finishStroke = (h) => {
+  const st = activeStrokes.get(h); activeStrokes.delete(h);
+  if (!st || st.pts.length < 4) { if (st && st.mesh) APP.scene.remove(st.mesh); return; }
+  if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); }
+
+  const style = st.style || brushState.style;
+  let physMode = st.physics || brushState.physics;
+  if (APP._keepStrokeGravity || APP._nextStrokeGravity) {
+    if (physMode === "none") physMode = "rigidbody";
+    APP._nextStrokeGravity = false;
+  }
+
+  // Magic Pen keeps AI shape classification when using default brush + no physics override
+  if (st.isMagic && style === "default" && physMode === "none") {
+    spawnMagicCreation(st.pts);
+    return;
+  }
+
+  if (physMode === "cloth") { finishClothStroke(st.pts, style); return; }
+  if (physMode === "grains") { finishGrainsStroke(st.pts, style); return; }
+
+  const curve = new THREE.CatmullRomCurve3(st.pts), pts = [];
+  const nS = clamp(Math.round(curve.getLength() / 0.032), 12, 48);
+  for (let i = 0; i <= nS; i++) pts.push(curve.getPointAt(i / nS));
+
+  const com = new THREE.Vector3(); pts.forEach(p => com.add(p)); com.multiplyScalar(1 / pts.length);
+  const localPts = pts.map(p => p.clone().sub(com));
+  const viewNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(APP.camera.quaternion).normalize();
+  const radius = style === "rope" ? 0.017 : (style === "2d" ? 0.016 : st.radius);
+
+  const built = createBrushStrokeMesh(localPts, radius, style, com, viewNormal);
+  const loopMesh = built.grp;
+  loopMesh.position.copy(com);
+  APP.scene.add(loopMesh);
+
+  const isRigid = physMode === "rigidbody";
+  const isSoft = physMode === "softbody";
+  const isDyn = isRigid || isSoft;
+
+  const restSegLens = [];
+  const restBendLens = [];
+  for (let i = 0; i < localPts.length - 1; i++) restSegLens.push(Math.max(0.005, localPts[i].distanceTo(localPts[i + 1])));
+  for (let i = 0; i < localPts.length - 2; i++) restBendLens.push(Math.max(0.008, localPts[i].distanceTo(localPts[i + 2])));
+
+  const sObj = {
+    mesh: loopMesh, mainMesh: built.mainMesh, grassData: built.grassData,
+    isRibbon: built.isRibbon, isRope: built.isRope, viewNormal,
+    radius, isDynamic: isDyn, isSoft,
+    localPts, worldPts: pts.map(p => p.clone()),
+    simP: pts.map(p => p.clone()), simQ: pts.map(p => p.clone()),
+    com: com.clone(), q: new THREE.Quaternion(), ent: null
+  };
+
+  const mxU = APP.applyDissolveShader(loopMesh, com.y - 1, com.y + 1, false);
+  mxU.uProg.value = 1;
+
+  const localTmp = Array.from({ length: localPts.length }, () => new THREE.Vector3());
+  const gDummy = new THREE.Object3D();
+
+  sObj.ent = APP.registerEntity({
+    name: `${style !== "default" ? style : "drawing"}${isSoft ? " softbody" : (isRigid ? " rigidbody" : "")}`,
+    type: "stroke", root: loopMesh, box: new THREE.Box3().setFromObject(loopMesh),
+    matrixUniforms: mxU, buildDur: 0.05, grabbable: !isSoft, _isSoft: isSoft, strokeObj: sObj,
+    upd: (dt) => {
+      if (!sObj.isDynamic || sObj.ent.dissolveStart || dt <= 0) return;
+      if (sObj.ent.heldBy) {
+        loopMesh.updateMatrixWorld(true);
+        for (let i = 0; i < localPts.length; i++) {
+          sObj.simP[i].copy(localPts[i]).applyMatrix4(loopMesh.matrixWorld);
+          sObj.simQ[i].copy(sObj.simP[i]); sObj.worldPts[i].copy(sObj.simP[i]);
+        }
+        sObj.com.copy(loopMesh.position); sObj.q.copy(loopMesh.quaternion); return;
+      }
+
+      const P = sObj.simP, Q = sObj.simQ, N = P.length, R = sObj.localPts;
+      const sub = isSoft ? 8 : 10, hStep = Math.min(dt, 0.03) / sub, grav = APP.worldG * hStep * hStep;
+      const cA = new THREE.Vector3(), cB = new THREE.Vector3(), diff = new THREE.Vector3(), tmp = new THREE.Vector3(), hitP = new THREE.Vector3();
+      const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart);
+
+      for (let s = 0; s < sub; s++) {
+        for (let i = 0; i < N; i++) {
+          const damp = isSoft ? 0.991 : 0.996;
+          const vx = (P[i].x - Q[i].x) * damp, vy = (P[i].y - Q[i].y) * damp, vz = (P[i].z - Q[i].z) * damp;
+          Q[i].copy(P[i]); P[i].x += vx; P[i].y += vy + grav; P[i].z += vz;
+          if (tank && tank.tankData && s === 0) {
+            const tk = tank.tankData;
+            if (Math.abs(P[i].x - tk.cx) < tk.halfW && Math.abs(P[i].z - tk.cz) < tk.halfD && P[i].y < tk.waterY && P[i].y > tk.baseY) {
+              P[i].y += Math.abs(grav) * 0.58; Q[i].lerp(P[i], 0.04);
+              if (Math.abs(vy) > 0.008 && APP._splashWater) APP._splashWater(P[i].x, P[i].z, 0.012, true);
+            }
+          }
+        }
+
+        // Hands + Laser Poke Interaction
+        for (const hd of APP.hands) {
+          if (hd.isDesk && !hd.act) continue;
+          const checks = [{ pos: hd.wp, r: 0.055, imp: hd.vel }, { pos: hd.tipWp, r: 0.024, imp: hd.vel }];
+          if (hd.act && hd.pokeHit && hd.pokeHit.ent === sObj.ent) {
+            checks.push({ pos: hd.pokeHit.point, r: 0.095, imp: hd.pokeHit.dir.clone().multiplyScalar(2.6) });
+          }
+          for (const hs of checks) {
+            const mD = sObj.radius + hs.r;
+            for (let i = 0; i < N - 1; i++) {
+              const { dist, t: ts } = pointToSeg(hs.pos, P[i], P[i + 1], hitP);
+              if (dist < mD && dist > 1e-6) {
+                diff.copy(hitP).sub(hs.pos).multiplyScalar((mD - dist) / dist);
+                const w0 = 1 - ts, w1 = ts, nm = w0 * w0 + w1 * w1 || 1;
+                P[i].addScaledVector(diff, w0 / nm); P[i + 1].addScaledVector(diff, w1 / nm);
+                P[i].addScaledVector(hs.imp, hStep * 0.45 * (w0 / nm)); P[i + 1].addScaledVector(hs.imp, hStep * 0.45 * (w1 / nm));
+              }
+            }
+          }
+        }
+
+        // Collide with other drawn rigid/soft strokes
+        for (const ot of drawnStrokes) {
+          if (ot === sObj || (ot.ent && ot.ent.dissolveStart)) continue;
+          const OP = ot.worldPts, mD = sObj.radius + ot.radius;
+          for (let i = 0; i < N - 1; i++) for (let j = 0; j < OP.length - 1; j++) {
+            const { s: ts } = closestSegSeg(P[i], P[i + 1], OP[j], OP[j + 1], cA, cB);
+            diff.copy(cA).sub(cB); const d = diff.length();
+            if (d < mD && d > 1e-6) {
+              diff.multiplyScalar((mD - d) / d); const w0 = 1 - ts, w1 = ts, nm = w0 * w0 + w1 * w1 || 1;
+              P[i].addScaledVector(diff, w0 / nm); P[i + 1].addScaledVector(diff, w1 / nm);
+              Q[i].lerp(P[i], 0.08); Q[i + 1].lerp(P[i + 1], 0.08);
+            }
+          }
+        }
+
+        // Scene floor, scanned walls & APP._phys.bodies collision
+        for (let i = 0; i < N; i++) {
+          if (P[i].y < sObj.radius) {
+            P[i].y = sObj.radius;
+            Q[i].x += (P[i].x - Q[i].x) * 0.3; Q[i].z += (P[i].z - Q[i].z) * 0.3;
+          }
+          if (s === 0) collideSphereWithScene(P[i], null, sObj.radius, 0.2);
+        }
+
+        if (isSoft) {
+          // Softbody segment-length & bend elasticity
+          for (let i = 0; i < N - 1; i++) {
+            diff.subVectors(P[i + 1], P[i]);
+            const d = diff.length() || 1e-6, corr = ((d - restSegLens[i]) / d) * 0.45;
+            P[i].addScaledVector(diff, corr); P[i + 1].addScaledVector(diff, -corr);
+          }
+          for (let i = 0; i < N - 2; i++) {
+            diff.subVectors(P[i + 2], P[i]);
+            const d = diff.length() || 1e-6, corr = ((d - restBendLens[i]) / d) * 0.18;
+            P[i].addScaledVector(diff, corr); P[i + 2].addScaledVector(diff, -corr);
+          }
+        }
+
+        const curCom = new THREE.Vector3(); for (let i = 0; i < N; i++) curCom.add(P[i]); curCom.multiplyScalar(1 / N);
+        const A = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for (let i = 0; i < N; i++) {
+          const px = P[i].x - curCom.x, py = P[i].y - curCom.y, pz = P[i].z - curCom.z, rx = R[i].x, ry = R[i].y, rz = R[i].z;
+          A[0] += px * rx; A[1] += py * rx; A[2] += pz * rx; A[3] += px * ry; A[4] += py * ry; A[5] += pz * ry; A[6] += px * rz; A[7] += py * rz; A[8] += pz * rz;
+        }
+        extractRotation(A, sObj.q, 5);
+        const shapeStiff = isSoft ? 0.08 : 0.92;
+        for (let i = 0; i < N; i++) { tmp.copy(R[i]).applyQuaternion(sObj.q).add(curCom); P[i].lerp(tmp, shapeStiff); }
+        sObj.com.copy(curCom);
+      }
+
+      if (isSoft) {
+        // Deform geometry vertices in-place in world-relative local coordinates (no rotation drift)
+        loopMesh.position.copy(sObj.com);
+        loopMesh.quaternion.identity();
+        for (let i = 0; i < N; i++) localTmp[i].copy(P[i]).sub(sObj.com);
+        const posAttr = sObj.mainMesh.geometry.attributes.position;
+        if (sObj.isRibbon) writeFlatRibbonVerts(localTmp, sObj.radius * 1.45, sObj.viewNormal, posAttr.array);
+        else writeWatertightTubeVerts(localTmp, sObj.isRope ? sObj.radius * 1.15 : sObj.radius, sObj.isRope ? 12 : 14, sObj.isRope, posAttr.array);
+        posAttr.needsUpdate = true;
+        sObj.mainMesh.geometry.computeVertexNormals();
+        sObj.mainMesh.geometry.computeBoundingSphere();
+
+        if (sObj.grassData) {
+          const { inst, bindings } = sObj.grassData;
+          for (let i = 0; i < bindings.length; i++) {
+            const b = bindings[i];
+            gDummy.position.copy(localTmp[b.sIdx]).lerp(localTmp[b.sIdx + 1], b.frac).add(b.off);
+            gDummy.rotation.copy(b.rot);
+            gDummy.scale.setScalar(b.sc);
+            gDummy.updateMatrix();
+            inst.setMatrixAt(i, gDummy.matrix);
+          }
+          inst.instanceMatrix.needsUpdate = true;
+        }
+      } else {
+        loopMesh.position.copy(sObj.com); loopMesh.quaternion.copy(sObj.q);
+      }
+      for (let i = 0; i < N; i++) sObj.worldPts[i].copy(P[i]);
+    },
+    dispose: () => { const ix = drawnStrokes.indexOf(sObj); if (ix >= 0) drawnStrokes.splice(ix, 1); }
+  });
+  drawnStrokes.push(sObj);
+};
+
+// ------------------------------------------------------------------------------
+// CNC Titanium Stylus & Magic Crystal Pen
+// ------------------------------------------------------------------------------
+const BRUSH_NIB_COLORS = {
+  default: 0x22d3ee, grass: 0x4ade80, metal: 0xe2e8f0, water: 0x38bdf8, rope: 0xfbbf24, glass: 0xcffafe, "2d": 0x60a5fa
+};
+
+const syncPenNibVisual = () => {
+  if (!currentPen || !currentPen.nibMat) return;
+  const col = currentPen.isMagic && brushState.style === "default" ? 0x00ffaa : (BRUSH_NIB_COLORS[brushState.style] || 0x22d3ee);
+  currentPen.nibMat.color.setHex(col);
+  currentPen.nibMat.emissive.setHex(col);
+};
+
+APP._spawnPen = (mode = "space") => {
+  const isMagic = String(mode).toLowerCase() === "magic";
+  APP.sfx.play(isMagic ? "magic" : "build");
+  if (currentPen && !currentPen.dissolveStart) APP.dissolve({ target: currentPen.id, duration: 0.4 });
+  const root = new THREE.Group();
+  const body = new THREE.MeshPhysicalMaterial({ color: isMagic ? 0x10131e : 0x1a1e24, metalness: 0.85, roughness: 0.22, clearcoat: 0.92, bumpMap: strokeBump, bumpScale: 0.0012 });
+  const trim = new THREE.MeshPhysicalMaterial({ color: isMagic ? 0xffc845 : 0xd4a44a, metalness: 0.96, roughness: 0.14 });
+  const nibCol = isMagic ? 0x00ffaa : (BRUSH_NIB_COLORS[brushState.style] || 0x22d3ee);
+  const nibM = new THREE.MeshPhysicalMaterial({ color: nibCol, emissive: nibCol, emissiveIntensity: 2.4, roughness: 0.08, clearcoat: 1 });
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.0065, 0.008, 0.13, 20), body); barrel.rotation.x = Math.PI / 2; barrel.position.z = 0.005; root.add(barrel);
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.0084, 0.0084, 0.012, 20), trim); collar.rotation.x = Math.PI / 2; collar.position.z = -0.056; root.add(collar);
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.0078, 0.038, 20), trim); cone.rotation.x = -Math.PI / 2; cone.position.z = -0.081; root.add(cone);
+  const nib = new THREE.Mesh(isMagic ? new THREE.OctahedronGeometry(0.0052, 0) : new THREE.SphereGeometry(0.0036, 12, 10), nibM); nib.position.z = -0.104; root.add(nib);
+
+  root.position.set(APP.headPos.x + APP.headFwd.x * 0.55, Math.max(0.95, APP.headPos.y - 0.25), APP.headPos.z + APP.headFwd.z * 0.55);
+  root.rotation.y = Math.atan2(-APP.headFwd.x, -APP.headFwd.z) + 0.6; APP.scene.add(root);
+  const b = APP.computeBox(root), mxU = APP.applyDissolveShader(root, b.min.y, b.max.y, false);
+  currentPen = APP.registerEntity({
+    name: isMagic ? "magic pen" : "pen", type: "pen", isMagic, nibMat: nibM, root, box: b, matrixUniforms: mxU,
+    buildDur: 0.8, grabbable: true, tipLocal: new THREE.Vector3(0, 0, -0.106), baseY: root.position.y,
+    upd: (dt, t) => { if (!currentPen.heldBy && !currentPen.dissolveStart) { root.position.y = currentPen.baseY + Math.sin(t * 2.4) * 0.025; root.rotation.y += dt * 0.7; } }
+  });
+  if (!APP.renderer.xr.isPresenting && APP._grabObj) APP._grabObj(APP.dhand, currentPen);
+  return currentPen;
+};
+
+// ------------------------------------------------------------------------------
+// Left-Hand Open-Palm Spatial Brush & Physics Toolbar
+// ------------------------------------------------------------------------------
+const tbGroup = new THREE.Group();
+tbGroup.visible = false;
+tbGroup.scale.setScalar(0.001);
+APP.scene.add(tbGroup);
+APP._palmToolbar = tbGroup;
+
+const PALM_W = 0.36, PALM_H = 0.255;
+const mkRoundedPlateGeo = (w, h, r) => {
+  const s = new THREE.Shape(), hw = w * 0.5, hh = h * 0.5;
+  s.moveTo(-hw + r, -hh); s.lineTo(hw - r, -hh); s.quadraticCurveTo(hw, -hh, hw, -hh + r);
+  s.lineTo(hw, hh - r); s.quadraticCurveTo(hw, hh, hw - r, hh);
+  s.lineTo(-hw + r, hh); s.quadraticCurveTo(-hw, hh, -hw, hh - r);
+  s.lineTo(-hw, -hh + r); s.quadraticCurveTo(-hw, -hh, -hw + r, -hh);
+  return new THREE.ShapeGeometry(s, 8);
+};
+const plateBg = new THREE.Mesh(
+  mkRoundedPlateGeo(PALM_W, PALM_H, 0.018),
+  new THREE.MeshPhysicalMaterial({ color: 0x050d0a, roughness: 0.22, metalness: 0.25, transparent: true, opacity: 0.88, side: THREE.DoubleSide })
+);
+plateBg.position.z = -0.004;
+tbGroup.add(plateBg);
+
+const plateRim = new THREE.LineLoop(
+  new THREE.BufferGeometry().setFromPoints(new THREE.Path(mkRoundedPlateGeo(PALM_W + 0.006, PALM_H + 0.006, 0.02).parameters ? [] : [])),
+  new THREE.LineBasicMaterial({ color: 0x00ff99, transparent: true, opacity: 0.7 })
+);
+// Clean glowing border outline
+{
+  const hw = PALM_W * 0.5 + 0.002, hh = PALM_H * 0.5 + 0.002;
+  plateRim.geometry.dispose();
+  plateRim.geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-hw, -hh, 0), new THREE.Vector3(hw, -hh, 0),
+    new THREE.Vector3(hw, hh, 0), new THREE.Vector3(-hw, hh, 0)
+  ]);
+  tbGroup.add(plateRim);
+}
+
+const headerCanvas = document.createElement("canvas"); headerCanvas.width = 512; headerCanvas.height = 56;
+const headerCtx = headerCanvas.getContext("2d");
+const headerTex = new THREE.CanvasTexture(headerCanvas); headerTex.encoding = THREE.sRGBEncoding;
+const headerMesh = new THREE.Mesh(new THREE.PlaneGeometry(PALM_W - 0.02, 0.028), new THREE.MeshBasicMaterial({ map: headerTex, transparent: true }));
+headerMesh.position.set(0, PALM_H * 0.5 - 0.02, 0.002);
+tbGroup.add(headerMesh);
+
+const drawPalmHeader = () => {
+  headerCtx.clearRect(0, 0, 512, 56);
+  headerCtx.fillStyle = "rgba(0, 255, 153, 0.12)";
+  headerCtx.fillRect(0, 0, 512, 56);
+  headerCtx.fillStyle = "#9effd4";
+  headerCtx.font = "bold 22px monospace";
+  headerCtx.textAlign = "center"; headerCtx.textBaseline = "middle";
+  headerCtx.fillText(`BRUSH: ${brushState.style.toUpperCase()}  |  PHYS: ${brushState.physics.toUpperCase()}`, 256, 28);
+  headerTex.needsUpdate = true;
+};
+drawPalmHeader();
+
+const drawPillTexture = (canvas, label, sub, accent, active) => {
+  const g = canvas.getContext("2d");
+  g.clearRect(0, 0, canvas.width, canvas.height);
+  g.fillStyle = active ? accent + "33" : "#0b1713";
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.strokeStyle = active ? "#ffffff" : accent;
+  g.lineWidth = active ? 8 : 4;
+  g.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+  g.fillStyle = active ? "#ffffff" : "#e2fff3";
+  g.font = "bold 30px system-ui, Segoe UI, sans-serif";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText(label, canvas.width / 2, sub ? 40 : 52);
+  if (sub) {
+    g.fillStyle = active ? "#ffffff" : accent;
+    g.font = "bold 18px monospace";
+    g.fillText(sub, canvas.width / 2, 76);
+  }
+};
+
+const palmButtons = [];
+const ensurePenEquipped = (magicMode = false) => {
+  if (!currentPen || currentPen.dissolveStart) APP._spawnPen(magicMode ? "magic" : "space");
+  else { currentPen.isMagic = magicMode; syncPenNibVisual(); }
+};
+
+const addPalmBtn = (x, y, w, h, label, sub, accent, isActiveFn, onTap) => {
+  const cv = document.createElement("canvas"); cv.width = 224; cv.height = 104;
+  const tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding; tex.anisotropy = 4;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+  mesh.position.set(x, y, 0.003);
+  tbGroup.add(mesh);
+  const btn = {
+    mesh, x, y, w, h, hovered: false,
+    refresh() { drawPillTexture(cv, label, sub, accent, isActiveFn()); tex.needsUpdate = true; },
+    onTap
+  };
+  btn.refresh();
+  mesh.userData.palmBtn = btn;
+  palmButtons.push(btn);
+  return btn;
+};
+
+const refreshPalmToolbar = () => {
+  drawPalmHeader();
+  palmButtons.forEach(b => b.refresh());
+  syncPenNibVisual();
+};
+
+// Row 1: 6 Cool Brush Styles (Grass, Metal, Water, Rope, Glass, 2D)
+const brushDefs = [
+  { id: "grass", label: "🌿 Grass",  sub: "عشب",   col: "#4ade80" },
+  { id: "metal", label: "⚙️ Metal",  sub: "معدن",  col: "#cbd5e1" },
+  { id: "water", label: "💧 Water",  sub: "ماء",   col: "#38bdf8" },
+  { id: "rope",  label: "🪢 Rope",   sub: "حبل",   col: "#fbbf24" },
+  { id: "glass", label: "🫧 Glass",  sub: "زجاج",  col: "#a5f3fc" },
+  { id: "2d",    label: "✏️ 2D",     sub: "ثنائي", col: "#818cf8" }
+];
+brushDefs.forEach((bd, i) => {
+  const bw = 0.052, bh = 0.052, x = -0.142 + i * 0.0568, y = 0.062;
+  addPalmBtn(x, y, bw, bh, bd.label, bd.sub, bd.col, () => brushState.style === bd.id, () => {
+    brushState.style = bd.id;
+    ensurePenEquipped(false);
+    refreshPalmToolbar();
+    APP.say("🎨 الفرشاة: " + bd.label);
+  });
+});
+
+// Row 2: 4 Physics Modes (Softbody, Rigidbody, Cloth, Grains)
+const physDefs = [
+  { id: "softbody",  label: "🫧 Softbody",  sub: "طري",   col: "#f472b6" },
+  { id: "rigidbody", label: "🧱 Rigidbody", sub: "صلب",   col: "#fb923c" },
+  { id: "cloth",     label: "🧣 Cloth",     sub: "قماش",  col: "#c084fc" },
+  { id: "grains",    label: "🏜️ Grains",    sub: "حبيبات", col: "#fde047" }
+];
+physDefs.forEach((pd, i) => {
+  const bw = 0.081, bh = 0.052, x = -0.129 + i * 0.086, y = -0.002;
+  addPalmBtn(x, y, bw, bh, pd.label, pd.sub, pd.col, () => brushState.physics === pd.id, () => {
+    brushState.physics = (brushState.physics === pd.id) ? "none" : pd.id;
+    ensurePenEquipped(false);
+    refreshPalmToolbar();
+    APP.say("⚛️ الفيزياء: " + (brushState.physics === "none" ? "ثابت (بدون)" : pd.label));
+  });
+});
+
+// Row 3: 2D Board + Equip Pen + Magic AI Shape Pen
+addPalmBtn(-0.108, -0.068, 0.124, 0.052, "📋 2D Board", "سبورة", "#00ff99", () => !!(currentBoard && !currentBoard.dissolveStart), () => {
+  APP._spawn2DBoard();
+  if (brushState.style === "default") brushState.style = "2d";
+  refreshPalmToolbar();
+});
+addPalmBtn(0.018, -0.068, 0.104, 0.052, "🖊️ Pen", "قلم", "#22d3ee", () => !!(currentPen && !currentPen.isMagic && !currentPen.dissolveStart), () => {
+  APP._spawnPen("space");
+  refreshPalmToolbar();
+});
+addPalmBtn(0.125, -0.068, 0.094, 0.052, "✨ Magic", "سحري", "#facc15", () => !!(currentPen && currentPen.isMagic && !currentPen.dissolveStart), () => {
+  brushState.style = "default";
+  brushState.physics = "none";
+  APP._spawnPen("magic");
+  refreshPalmToolbar();
+});
+
+// ------------------------------------------------------------------------------
+// Open-Palm Detection, Board Writing & Stroke Tick Loop
+// ------------------------------------------------------------------------------
+let palmOpenState = false;
+let palmLastSeenAt = 0;
+let manualToolbarPin = false;
+let tbScale = 0.001;
+let lastTbTapAt = 0;
+
+const jWrist = new THREE.Vector3(), jIdxM = new THREE.Vector3(), jPnkM = new THREE.Vector3(), jMidM = new THREE.Vector3();
+const jTmpA = new THREE.Vector3(), jTmpB = new THREE.Vector3(), palmNrm = new THREE.Vector3(), palmCtr = new THREE.Vector3();
+const tbRay = new THREE.Raycaster(), tbTmpQ = new THREE.Quaternion(), tbTmpW = new THREE.Vector3(), tbTmpD = new THREE.Vector3();
+
+const detectLeftPalmOpen = (lh) => {
+  if (!lh || !lh.handTrackingActive || !lh.xrHand || !lh.xrHand.joints) return null;
+  if (lh.held || lh.act) return null;
+  const j = lh.xrHand.joints;
+  const wrist = j["wrist"];
+  const idxMeta = j["index-finger-metacarpal"] || j["index-finger-phalanx-proximal"];
+  const pnkMeta = j["pinky-finger-metacarpal"] || j["pinky-finger-phalanx-proximal"];
+  const midMeta = j["middle-finger-metacarpal"] || j["middle-finger-phalanx-proximal"];
+  if (!wrist || !idxMeta || !pnkMeta || !midMeta) return null;
+
+  wrist.getWorldPosition(jWrist);
+  idxMeta.getWorldPosition(jIdxM);
+  pnkMeta.getWorldPosition(jPnkM);
+  midMeta.getWorldPosition(jMidM);
+  if (jWrist.lengthSq() < 1e-5 || jIdxM.distanceTo(jWrist) < 0.01) return null;
+
+  const fingerPairs = [
+    ["index-finger-phalanx-proximal", "index-finger-tip"],
+    ["middle-finger-phalanx-proximal", "middle-finger-tip"],
+    ["ring-finger-phalanx-proximal", "ring-finger-tip"],
+    ["pinky-finger-phalanx-proximal", "pinky-finger-tip"]
+  ];
+  let extCount = 0;
+  for (const [pName, tName] of fingerPairs) {
+    const pJ = j[pName], tJ = j[tName];
+    if (!pJ || !tJ) continue;
+    pJ.getWorldPosition(jTmpA); tJ.getWorldPosition(jTmpB);
+    const dProx = jWrist.distanceTo(jTmpA), dTip = jWrist.distanceTo(jTmpB);
+    if (dTip > dProx * 1.36 && dTip > 0.085) extCount++;
+  }
+  const thJ = j["thumb-tip"];
+  let thumbOpen = true;
+  if (thJ) { thJ.getWorldPosition(jTmpA); thumbOpen = jTmpA.distanceTo(jPnkM) > 0.068; }
+
+  // On the left hand: (pinkyMeta - wrist) x (indexMeta - wrist) points straight out of the PALM
+  const vIdx = jIdxM.clone().sub(jWrist);
+  const vPnk = jPnkM.clone().sub(jWrist);
+  palmNrm.crossVectors(vPnk, vIdx);
+  if (palmNrm.lengthSq() < 1e-8) return null;
+  palmNrm.normalize();
+
+  palmCtr.copy(jWrist).lerp(jMidM, 0.58);
+  const toHead = APP.headPos.clone().sub(palmCtr).normalize();
+  const facing = palmNrm.dot(toHead);
+
+  const neededFingers = palmOpenState ? 3 : 4;
+  const neededFacing = palmOpenState ? 0.16 : 0.34;
+  if (extCount >= neededFingers && (palmOpenState || thumbOpen) && facing > neededFacing) {
+    return { center: palmCtr.clone(), normal: palmNrm.clone() };
+  }
+  return null;
+};
+
+APP._toggleBrushToolbar = (force) => {
+  manualToolbarPin = force !== undefined ? !!force : !manualToolbarPin;
+  if (manualToolbarPin) {
+    const fwd = APP.headFwd.clone().normalize();
+    tbGroup.position.set(APP.headPos.x + fwd.x * 0.56, Math.max(0.95, APP.headPos.y - 0.16), APP.headPos.z + fwd.z * 0.56);
+    tbGroup.lookAt(APP.headPos);
+    refreshPalmToolbar();
+  }
+  APP.say(manualToolbarPin ? "🎨 تم إظهار لوحة الفرشاة والفيزياء" : "🎨 تم إخفاء لوحة الفرشاة");
+};
+
+// Raycast interaction for controller trigger & desktop mouse on Palm Toolbar & 2D Board
+const hitPalmToolbarRay = (ray) => {
+  if (!tbGroup.visible || tbScale < 0.2) return false;
+  const hit = ray.intersectObjects(palmButtons.map(b => b.mesh), false)[0];
+  if (hit && hit.distance < 3.0 && hit.object.userData.palmBtn) {
+    APP.sfx.play("click");
+    hit.object.userData.palmBtn.onTap();
+    return true;
+  }
+  return false;
+};
+
+const hitBoardRay = (ray, inputKey, isTap) => {
+  if (!currentBoard || currentBoard.dissolveStart || !currentBoard.boardData) return false;
+  const bd = currentBoard.boardData;
+  if (isTap) {
+    const bHit = ray.intersectObjects(bd.frameButtons.map(f => f.mesh), false)[0];
+    if (bHit && bHit.distance < 4.0) {
+      const fb = bd.frameButtons.find(f => f.mesh === bHit.object);
+      if (fb) { fb.action(); return true; }
+    }
+  }
+  const sHit = ray.intersectObject(bd.surfaceMesh, false)[0];
+  if (sHit && sHit.distance < 4.5) {
+    const loc = currentBoard.root.worldToLocal(sHit.point.clone());
+    bd.paintAtLocal(inputKey, loc.x, loc.y);
+    return true;
+  }
+  return false;
+};
+
+APP.on("selectstart", h => {
+  if (h.isDesk || h.handTrackingActive || !h.c) return;
+  h.c.getWorldPosition(tbTmpW); h.c.getWorldQuaternion(tbTmpQ);
+  tbTmpD.set(0, 0, -1).applyQuaternion(tbTmpQ); tbRay.set(tbTmpW, tbTmpD);
+  if (hitPalmToolbarRay(tbRay)) return;
+  hitBoardRay(tbRay, "ctrl_" + h.side, true);
+});
+
+APP.on("pinchstart", h => {
+  if (h.isDesk) return;
+  if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData) {
+    const bd = currentBoard.boardData;
+    for (const fb of bd.frameButtons) {
+      const wp = fb.mesh.getWorldPosition(tbTmpW);
+      if (h.tipWp.distanceTo(wp) < 0.08) { fb.action(); return; }
+    }
+  }
+});
+
+let deskWritingBoard = false;
+APP.on("pointerdown", ev => {
+  if (hitPalmToolbarRay(ev.ray)) { ev.handled = true; return; }
+  if (hitBoardRay(ev.ray, "desk_mouse", true)) { deskWritingBoard = true; ev.handled = true; return; }
+});
+APP.on("pointerup", () => {
+  deskWritingBoard = false;
+  if (currentBoard && currentBoard.boardData) currentBoard.boardData.resetStroke("desk_mouse");
+});
+
+APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
+  const now = performance.now() / 1000;
+
+  // 1. Update Left-Hand Open-Palm Toolbar visibility & placement
+  const leftHand = APP.hands.find(h => h.side === "left" && !h.isDesk);
+  const palmInfo = detectLeftPalmOpen(leftHand);
+  if (palmInfo) {
+    palmOpenState = true;
+    palmLastSeenAt = now;
+    const tgtPos = palmInfo.center.clone().addScaledVector(palmInfo.normal, 0.135).add(new THREE.Vector3(0, 0.055, 0));
+    if (!tbGroup.visible) tbGroup.position.copy(tgtPos);
+    else tbGroup.position.lerp(tgtPos, Math.min(1, dt * 14));
+    tbGroup.lookAt(APP.headPos);
+  } else if (palmOpenState && now - palmLastSeenAt > 0.35) {
+    palmOpenState = false;
+  }
+
+  const shouldShow = palmOpenState || manualToolbarPin;
+  tbScale += ((shouldShow ? 1.0 : 0.001) - tbScale) * Math.min(1, dt * 16);
+  tbGroup.visible = tbScale > 0.03;
+  tbGroup.scale.setScalar(tbScale);
+
+  // 2. Right-hand fingertip & laser hover/tap on Left-Hand Toolbar
+  if (tbGroup.visible && tbScale > 0.5) {
+    palmButtons.forEach(b => (b.hovered = false));
+    for (const h of APP.hands) {
+      if (h === leftHand && palmOpenState) continue;
+      if (!h.isDesk) {
+        const loc = tbGroup.worldToLocal(h.tipWp.clone());
+        if (Math.abs(loc.z) < 0.055) {
+          for (const b of palmButtons) {
+            if (Math.abs(loc.x - b.x) <= b.w * 0.52 && Math.abs(loc.y - b.y) <= b.h * 0.52) {
+              b.hovered = true;
+              if (Math.abs(loc.z) < 0.024 && now - lastTbTapAt > 0.45) {
+                lastTbTapAt = now;
+                APP.sfx.play("click");
+                b.onTap();
+              }
+            }
+          }
+        }
+        if (!h.handTrackingActive && h.c) {
+          h.c.getWorldPosition(tbTmpW); h.c.getWorldQuaternion(tbTmpQ);
+          tbTmpD.set(0, 0, -1).applyQuaternion(tbTmpQ); tbRay.set(tbTmpW, tbTmpD);
+          const hit = tbRay.intersectObjects(palmButtons.map(b => b.mesh), false)[0];
+          if (hit && hit.distance < 3.0 && hit.object.userData.palmBtn) {
+            hit.object.userData.palmBtn.hovered = true;
+            if (h.laser) h.laser.scale.z = hit.distance / 4.0;
+          }
+        }
+      }
+    }
+    for (const b of palmButtons) b.mesh.scale.setScalar(b.hovered ? 1.09 : 1.0);
+  }
+
+  // 3. Continuous 2D Board writing from Desktop drag or Controller Laser hold
+  if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData) {
+    if (deskWritingBoard && APP.pointer.down) {
+      hitBoardRay(APP.pointer.ray, "desk_mouse", false);
+    }
+    for (const h of APP.hands) {
+      if (h.isDesk || h.handTrackingActive || !h.c) continue;
+      if (h.act) {
+        h.c.getWorldPosition(tbTmpW); h.c.getWorldQuaternion(tbTmpQ);
+        tbTmpD.set(0, 0, -1).applyQuaternion(tbTmpQ); tbRay.set(tbTmpW, tbTmpD);
+        if (!hitBoardRay(tbRay, "ctrl_" + h.side, false)) currentBoard.boardData.resetStroke("ctrl_" + h.side);
+      } else {
+        currentBoard.boardData.resetStroke("ctrl_" + h.side);
+      }
+    }
+  }
+
+  // 4. Pen Drawing (either flat onto 2D Board or 3D Stroke)
+  for (const h of APP.hands) {
+    if (!currentPen || currentPen.dissolveStart || currentPen.heldBy !== h || !h.act) {
+      if (activeStrokes.has(h)) finishStroke(h);
+      if (currentBoard && currentBoard.boardData) currentBoard.boardData.resetStroke("pen_" + h.side);
+      continue;
+    }
+
+    currentPen.root.updateMatrixWorld(true);
+    const tip = currentPen.tipLocal.clone().applyMatrix4(currentPen.root.matrixWorld);
+
+    // If holding pen near the 2D board (and no 3D physics mode active), write cleanly onto the 2D board!
+    let wroteOnBoard = false;
+    if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData && brushState.physics === "none") {
+      const bd = currentBoard.boardData;
+      if (h.isDesk) {
+        wroteOnBoard = hitBoardRay(APP.pointer.ray, "pen_" + h.side, false);
+      } else {
+        const loc = currentBoard.root.worldToLocal(tip.clone());
+        if (Math.abs(loc.z - 0.011) < 0.075 && Math.abs(loc.x) <= bd.W * 0.5 && Math.abs(loc.y) <= bd.H * 0.5) {
+          bd.paintAtLocal("pen_" + h.side, loc.x, loc.y);
+          wroteOnBoard = true;
+        }
+      }
+    }
+    if (wroteOnBoard) {
+      if (activeStrokes.has(h)) {
+        const s0 = activeStrokes.get(h);
+        if (s0.mesh) { APP.scene.remove(s0.mesh); s0.mesh.geometry.dispose(); }
+        activeStrokes.delete(h);
+      }
+      continue;
+    } else if (currentBoard && currentBoard.boardData) {
+      currentBoard.boardData.resetStroke("pen_" + h.side);
+    }
+
+    // Snap pen tip to board plane if drawing 3D physics right off the board or in 2d style
+    const drawTip = tip.clone();
+    if (brushState.style === "2d" && currentBoard && !currentBoard.dissolveStart) {
+      const bd = currentBoard.boardData;
+      const loc = currentBoard.root.worldToLocal(drawTip.clone());
+      if (Math.abs(loc.z - 0.011) < 0.12 && Math.abs(loc.x) <= bd.W * 0.55 && Math.abs(loc.y) <= bd.H * 0.55) {
+        loc.z = 0.025;
+        drawTip.copy(loc).applyMatrix4(currentBoard.root.matrixWorld);
+      }
+    }
+
+    let st = activeStrokes.get(h);
+    if (!st) {
+      const isM = !!currentPen.isMagic;
+      const curStyle = brushState.style;
+      const previewCol = BRUSH_NIB_COLORS[curStyle] || (isM ? 0x26ffd0 : 0x38d9ff);
+      st = {
+        pts: [drawTip], mesh: null,
+        radius: isM && curStyle === "default" ? 0.009 : 0.014,
+        isMagic: isM, style: curStyle, physics: brushState.physics,
+        mat: new THREE.MeshPhysicalMaterial({
+          color: previewCol, emissive: previewCol, emissiveIntensity: 0.45,
+          metalness: curStyle === "metal" ? 0.9 : 0.35, roughness: 0.22,
+          transparent: curStyle === "water" || curStyle === "glass",
+          opacity: curStyle === "water" ? 0.72 : (curStyle === "glass" ? 0.48 : 1.0)
+        })
+      };
+      activeStrokes.set(h, st);
+      continue;
+    }
+
+    if (st.pts[st.pts.length - 1].distanceTo(drawTip) >= 0.015) {
+      st.pts.push(drawTip);
+      if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); }
+      st.mesh = buildTube(st.pts, st.radius, st.mat);
+      if (st.mesh) APP.scene.add(st.mesh);
+    }
+  }
+}, null, true);
+
+APP.on("clear", () => {
+  activeStrokes.forEach(s => { if (s.mesh) APP.scene.remove(s.mesh); });
+  activeStrokes.clear();
+});
+
+@ability: pen_space
+@match: give & pen | pen | اعطني قلم | قلم | ارسم
+@code: if (APP._spawnPen) APP._spawnPen("space");
+
+@ability: magic_pen
+@match: magic & pen | قلم سحري
+@code: if (APP._spawnPen) APP._spawnPen("magic");
+
+@ability: brush_toolbar
+@match: brush & toolbar | palette | toolbar | لوحة الرسم | لوحة الفرشاة | شريط الفرشاة
+@code: if (APP._toggleBrushToolbar) APP._toggleBrushToolbar();
+
+@ability: spawn_2d_board
+@match: 2d & board | whiteboard | board | سبورة | سبوره | لوح الرسم
+@code: if (APP._spawn2DBoard) APP._spawn2DBoard();
+
+@ability: next_drawing_gravity
+@match: gravity & drawing | gravity & next | جاذبية & رسم | جاذبيه & رسم | اعطي & جاذبيه
+@code:
+APP._keepStrokeGravity = true;
+APP._nextStrokeGravity = true;
+APP.worldG = -9.8;
+if (APP._brushState) APP._brushState.physics = "rigidbody";
+APP.say("⚡ الجاذبية مفعلة للرسومات القادمة حتى تقول انزع الجاذبية");
+
+@ability: spawn_butterfly
+@match: create & butterfly | butterfly | اصنع فراشة | اصنع فراشه | فراشة | فراشه
+@code:
+APP.sfx.play("magic");
+const sp = APP.spawnPos(1.35, 0);
+if (APP._spawnButterfly) APP._spawnButterfly(new APP.THREE.Vector3(sp.x, 1.38, sp.z), 0.22);
