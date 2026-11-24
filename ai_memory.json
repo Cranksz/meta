@@ -59,7 +59,21 @@
     },
     "effects": {},
     "physics": {},
-    "interactions": {}
+    "interactions": {
+      "pen": {
+        "target": "pen",
+        "likes": [],
+        "dislikes": [
+          "user explicitly wants pen to work after re-spawning"
+        ],
+        "notes": [
+          "user explicitly wants pen to work after re-spawning"
+        ],
+        "preferredParams": {},
+        "count": 1,
+        "lastUpdated": "2026-11-24T23:36:47.673Z"
+      }
+    }
   },
   "recurringPatterns": [
     {
@@ -81,6 +95,16 @@
       "confidence": 0.57,
       "autoApplied": false,
       "updatedAt": "2026-11-24T23:36:30.373Z"
+    },
+    {
+      "key": "interactions:pen",
+      "category": "interactions",
+      "target": "pen",
+      "evidenceCount": 1,
+      "summary": "user explicitly wants pen to work after re-spawning",
+      "confidence": 0.57,
+      "autoApplied": false,
+      "updatedAt": "2026-11-24T23:36:47.673Z"
     }
   ],
   "recentFeedbackLog": [
@@ -97,6 +121,13 @@
       "target": "magic pen",
       "sentiment": "negative",
       "summary": "ink still not appearing with magic pen"
+    },
+    {
+      "time": "2026-11-24T23:36:47.673Z",
+      "category": "interactions",
+      "target": "pen",
+      "sentiment": "correction",
+      "summary": "user explicitly wants pen to work after re-spawning"
     }
   ]
 }
