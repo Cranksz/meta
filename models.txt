@@ -1,0 +1,685 @@
+# ==============================================================================
+# DEVELOPER NOTE (models.txt):
+# Separated 3D models, portals, Matrix/Passthrough worlds, Concert Piano,
+# Semantic Fusion Device ("الجهاز العجيب"), and dynamic GLB spawner.
+# Add, edit, or remove any @ability block freely without touching the HTML.
+# ==============================================================================
+
+@ability: spawn_horse
+@match: create & horse | horse | اصنع & حصان | حصان
+@code:
+const h = await APP.spawnGLB({ file: "horse.glb", name: "horse", height: 1.65, dist: 2.25, yaw: 36 });
+h.semanticTag = "quadruped";
+
+@ability: spawn_dragon
+@match: create & dragon | dragon | اصنع & تنين | تنين
+@code:
+const dragon = await APP.spawnGLB({ file: "dragon.glb", name: "dragon", height: 2.2, dist: 2.6, yaw: 28, particles: "sparks" });
+dragon.semanticTag = "wing_creature";
+const b = APP.computeBox(dragon.root), c = b.getCenter(new APP.THREE.Vector3());
+APP.fx.groundPulse(c.x, c.z, 2.4, 0xff6600);
+
+@ability: spawn_car
+@match: create & car | car | اصنع سيارة | سيارة | سياره
+@code:
+const car = await APP.spawnGLB({ file: "car.glb", name: "car", length: 3.9, dist: 2.7, yaw: -38 });
+car.semanticTag = "vehicle";
+
+@ability: enter_forest
+@match: forest | woods | اجعلني في الغابة | اجعلني في الغابه | الغابة | الغابه
+@do: await APP.spawnGLB({ file: "forest.glb", name: "forest", radial: true });
+
+@ability: delete_all
+@match: delete | clear | remove | احذف | امسح
+@do: APP.clear();
+
+@ability: enter_matrix_world
+@match: enter & matrix | ادخل الماتريكس | الماتريكس | ماتريكس
+@code:
+APP.sfx.play("magic");
+for (const e of [...APP.entities]) if (e.type === "env_360" || e.type === "forest") APP.dissolve({ target: e.id, duration: 0.45 });
+APP.setEnv("matrix_black");
+APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 6.0, 0x00ff66);
+APP.say("🟩 دخلت عالم الماتريكس");
+
+@ability: passthrough_mode
+@match: passthrough | real & world | اظهر الواقع | الواقع
+@code:
+APP.sfx.play("magic");
+for (const e of [...APP.entities]) if (e.type === "env_360" || e.type === "forest") APP.dissolve({ target: e.id, duration: 0.45 });
+APP.setEnv("default");
+const sess = APP.renderer.xr.getSession();
+if (sess && sess.environmentBlendMode === "opaque" && navigator.xr) {
+  await sess.end();
+  try {
+    const arSess = await navigator.xr.requestSession("immersive-ar", { optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking", "plane-detection", "mesh-detection", "light-estimation"] });
+    APP.renderer.xr.setReferenceSpaceType("local-floor"); await APP.renderer.xr.setSession(arSess);
+  } catch {}
+}
+APP.renderer.setClearAlpha(0); APP.scene.background = null; APP.scene.fog = null;
+APP.say("👁 تم إظهار الواقع الحقيقي (Passthrough)");
+
+@ability: spawn_piano
+@match: create & piano | piano | اصنع بيانو | بيانو
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+const sp = APP.spawnPos(1.25, 0);
+const root = new THREE.Group(); root.position.set(sp.x, 0, sp.z); root.rotation.y = sp.ry;
+
+// Procedural lacquered wood grain + cast iron harp bump
+const lacquerTex = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 256; const x = c.getContext("2d");
+  x.fillStyle = "#0b0c0f"; x.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 180; i++) { x.fillStyle = "rgba(35,38,48,0.18)"; x.fillRect(Math.random() * 256, 0, 1 + Math.random() * 2, 256); }
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+})();
+const ebony = new THREE.MeshPhysicalMaterial({ map: lacquerTex, roughness: 0.05, metalness: 0.1, clearcoat: 1.0, clearcoatRoughness: 0.03, envMapIntensity: 2.0 });
+const brass = new THREE.MeshPhysicalMaterial({ color: 0xd8a845, metalness: 0.95, roughness: 0.14 });
+const steelStr = new THREE.MeshStandardMaterial({ color: 0xd0d6de, metalness: 0.95, roughness: 0.18 });
+const feltRed = new THREE.MeshStandardMaterial({ color: 0x6b0b12, roughness: 0.95 });
+const whiteKeyMat = new THREE.MeshPhysicalMaterial({ color: 0xf7f5ef, roughness: 0.15, clearcoat: 0.72 });
+const blackKeyMat = new THREE.MeshPhysicalMaterial({ color: 0x101114, roughness: 0.24, clearcoat: 0.42 });
+
+const bodyShape = new THREE.Shape();
+bodyShape.moveTo(-0.71, 0.22); bodyShape.lineTo(0.71, 0.22); bodyShape.lineTo(0.71, -0.35);
+bodyShape.bezierCurveTo(0.71, -1.05, 0.14, -1.25, -0.15, -1.52); bodyShape.bezierCurveTo(-0.54, -1.74, -0.71, -1.25, -0.71, -0.75); bodyShape.closePath();
+const bodyMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(bodyShape, { depth: 0.24, bevelEnabled: true, bevelThickness: 0.012, bevelSize: 0.012, bevelSegments: 4 }).rotateX(Math.PI / 2), ebony);
+bodyMesh.position.y = 0.95; bodyMesh.castShadow = bodyMesh.receiveShadow = true; root.add(bodyMesh);
+
+const keybed = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.045, 0.34), ebony); keybed.position.set(0, 0.71, 0.28); keybed.castShadow = true; root.add(keybed);
+const feltStrip = new THREE.Mesh(new THREE.BoxGeometry(1.24, 0.012, 0.015), feltRed); feltStrip.position.set(0, 0.752, 0.225); root.add(feltStrip);
+const lid = new THREE.Mesh(new THREE.ExtrudeGeometry(bodyShape, { depth: 0.018, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004 }).rotateX(Math.PI / 2), ebony);
+lid.position.set(-0.31, 1.2, 0); lid.rotation.z = 0.44; lid.castShadow = true; root.add(lid);
+const prop = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.72, 10), brass); prop.position.set(0.45, 1.25, -0.45); prop.rotation.z = -0.18; root.add(prop);
+
+// Cast-gold Harp Plate + Stretched Steel Strings inside Piano
+const harp = new THREE.Mesh(new THREE.PlaneGeometry(1.12, 1.22).rotateX(-Math.PI / 2), brass); harp.position.set(0, 0.955, -0.45); root.add(harp);
+for (let s = 0; s < 26; s++) {
+  const sx = -0.54 + s * 0.042, slen = 1.25 - s * 0.025;
+  const str = new THREE.Mesh(new THREE.CylinderGeometry(0.0018, 0.0018, slen, 6), s < 8 ? brass : steelStr);
+  str.rotation.x = Math.PI / 2; str.position.set(sx, 0.964, -0.18 - slen * 0.42);
+  root.add(str);
+}
+
+[[-0.62, 0.18], [0.62, 0.18], [-0.4, -1.2]].forEach(([lx, lz]) => {
+  const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.025, 0.69, 14), ebony); leg.position.set(lx, 0.345, lz); leg.castShadow = true; root.add(leg);
+  const caster = new THREE.Mesh(new THREE.SphereGeometry(0.025, 10, 8), brass); caster.position.set(lx, 0.025, lz); root.add(caster);
+});
+const lyre = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.67, 0.045), ebony); lyre.position.set(0, 0.335, 0.04); root.add(lyre);
+[-0.055, 0, 0.055].forEach(px => { const pd = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.018, 0.11), brass); pd.position.set(px, 0.035, 0.09); root.add(pd); });
+
+const keys = [];
+const playNote = (midi) => {
+  const ctx = APP.sfx.ctx; if (!ctx) return;
+  const freq = 440 * Math.pow(2, (midi - 69) / 12), t = ctx.currentTime, master = ctx.createGain();
+  master.gain.setValueAtTime(0.001, t); master.gain.linearRampToValueAtTime(0.22, t + 0.008);
+  master.gain.exponentialRampToValueAtTime(0.04, t + 0.5); master.gain.exponentialRampToValueAtTime(0.0008, t + 2.0);
+  master.connect(ctx.destination);
+  [1, 2, 3, 4].forEach((h, idx) => {
+    const osc = ctx.createOscillator(), hg = ctx.createGain();
+    osc.type = idx === 0 ? "triangle" : "sine"; osc.frequency.setValueAtTime(freq * h, t);
+    hg.gain.value = [0.65, 0.24, 0.1, 0.04][idx]; osc.connect(hg).connect(master); osc.start(t); osc.stop(t + 2.05);
+  });
+};
+
+const whitePitchStep = 0.0238, whiteW = 0.0226, whiteL = 0.148, whiteH = 0.022, blackW = 0.0132, blackL = 0.094, blackH = 0.015;
+const isBlack = [false, true, false, true, false, false, true, false, true, false, true, false];
+let wCount = 0; for (let m = 36; m <= 87; m++) if (!isBlack[m % 12]) wCount++;
+const totalKeyW = wCount * whitePitchStep; let wi = 0;
+for (let m = 36; m <= 87; m++) {
+  if (!isBlack[m % 12]) {
+    const km = new THREE.Mesh(new THREE.BoxGeometry(whiteW, whiteH, whiteL), whiteKeyMat.clone());
+    km.position.set(-totalKeyW * 0.5 + (wi + 0.5) * whitePitchStep, 0.742, 0.305); root.add(km);
+    keys.push({ mesh: km, baseY: 0.742, midi: m, pressed: false, pressT: 0 }); wi++;
+  } else {
+    const km = new THREE.Mesh(new THREE.BoxGeometry(blackW, blackH, blackL), blackKeyMat.clone());
+    km.position.set(-totalKeyW * 0.5 + wi * whitePitchStep, 0.758, 0.275); root.add(km);
+    keys.push({ mesh: km, baseY: 0.758, midi: m, pressed: false, pressT: 0 });
+  }
+}
+
+APP.scene.add(root);
+const pb = APP.computeBox(root), mxU = APP.applyDissolveShader(root, pb.min.y, pb.max.y, false);
+APP.fx.groundPulse(sp.x, sp.z, 1.8, 0x00ff88);
+
+const kwPos = new THREE.Vector3();
+const offPtr = APP.on("pointerdown", ev => {
+  const hits = ev.ray.intersectObjects(keys.map(k => k.mesh), false);
+  if (hits.length) {
+    const k = keys.find(item => item.mesh === hits[0].object);
+    if (k) { k.pressT = 0.2; playNote(k.midi); ev.handled = true; }
+  }
+});
+
+APP.registerEntity({
+  name: "grand piano", type: "piano", root, box: pb, matrixUniforms: mxU, buildDur: 2.0,
+  upd: (dt) => {
+    for (const k of keys) {
+      k.mesh.getWorldPosition(kwPos);
+      let hit = false;
+      for (const h of APP.hands) {
+        if (h.isDesk) continue;
+        const pts = h.handTrackingActive ? h.fingerTips : [h.tipWp];
+        for (const p of pts) if (Math.abs(p.x - kwPos.x) < 0.013 && Math.abs(p.z - kwPos.z) < 0.065 && Math.abs(p.y - kwPos.y) < 0.026) { hit = true; break; }
+        if (hit) break;
+      }
+      if (hit && !k.pressed) { k.pressed = true; k.pressT = 0.16; playNote(k.midi); }
+      else if (!hit) k.pressed = false;
+      if (k.pressT > 0) k.pressT = Math.max(0, k.pressT - dt);
+      const down = (k.pressed || k.pressT > 0) ? 0.011 : 0;
+      k.mesh.position.y += ((k.baseY - down) - k.mesh.position.y) * Math.min(1, dt * 28);
+      k.mesh.material.emissive.setHex((k.pressed || k.pressT > 0) ? 0x164a5c : 0x000000);
+    }
+  },
+  dispose: () => offPtr()
+});
+
+@ability: add_window_portal
+@match: window | نافذة | نافذه | اضف نافذة | اضف نافذه
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("magic");
+let tex = APP.findImage("window.jpg");
+if (!tex) {
+  const cv = document.createElement("canvas"); cv.width = 2048; cv.height = 1024; const g = cv.getContext("2d");
+  const sky = g.createLinearGradient(0, 0, 0, 620);
+  sky.addColorStop(0, "#194a85"); sky.addColorStop(0.55, "#74bdf2"); sky.addColorStop(1, "#ffe5b0");
+  g.fillStyle = sky; g.fillRect(0, 0, 2048, 620);
+  g.fillStyle = "#fff0b8"; g.beginPath(); g.arc(1400, 340, 72, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#264e34"; g.fillRect(0, 620, 2048, 404);
+  for (let i = 0; i < 32; i++) {
+    g.fillStyle = i % 2 === 0 ? "#1f422b" : "#2f5f40";
+    g.beginPath(); g.moveTo(i * 75 - 40, 625); g.lineTo(i * 75 + 20, 480 + (i % 4) * 32); g.lineTo(i * 75 + 90, 625); g.fill();
+  }
+  tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+}
+
+await APP.requestRoomScan();
+const hit = APP.findNearestWall(APP.headPos, APP.headFwd);
+const root = new THREE.Group();
+if (hit) {
+  root.position.copy(hit.point).addScaledVector(hit.normal, 0.008);
+  root.lookAt(root.position.clone().add(hit.normal));
+  APP.say("🪟 تم تثبيت النافذة داخل الجدار الحقيقي");
+} else {
+  const bounds = APP.roomBounds;
+  const wallZ = bounds[0] ? bounds[0].z : -2.6;
+  root.position.set(APP.headPos.x, 1.4, wallZ);
+  root.lookAt(APP.headPos.x, 1.4, APP.headPos.z);
+  APP.say("🪟 تم تثبيت النافذة على جدار الغرفة");
+}
+
+const W = 1.15, H = 1.15;
+const portalMat = new THREE.ShaderMaterial({
+  uniforms: { uTex: { value: tex } }, side: THREE.DoubleSide,
+  vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: `uniform sampler2D uTex; varying vec3 vW; void main(){ vec3 d = normalize(vW - cameraPosition); gl_FragColor = texture2D(uTex, vec2(atan(d.z, d.x)/6.2831853 + 0.5, asin(clamp(d.y,-0.999,0.999))/3.14159265 + 0.5)); }`
+});
+root.add(new THREE.Mesh(new THREE.PlaneGeometry(W, H), portalMat));
+const woodC = document.createElement("canvas"); woodC.width = 256; woodC.height = 256; const wg = woodC.getContext("2d");
+wg.fillStyle = "#3f2617"; wg.fillRect(0, 0, 256, 256);
+for (let i = 0; i < 120; i++) { wg.fillStyle = "rgba(25,12,5,0.22)"; wg.fillRect(Math.random() * 256, 0, 3, 256); }
+const frameMat = new THREE.MeshPhysicalMaterial({ map: new THREE.CanvasTexture(woodC), roughness: 0.34, clearcoat: 0.45 });
+[[0, H/2+0.038, W+0.15, 0.075], [0, -H/2-0.038, W+0.2, 0.085], [-W/2-0.038, 0, 0.075, H], [W/2+0.038, 0, 0.075, H]].forEach(([x,y,fw,fh]) => {
+  const b = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.085), frameMat); b.position.set(x, y, 0.012); b.castShadow = true; root.add(b);
+});
+root.add(new THREE.Mesh(new THREE.BoxGeometry(0.022, H, 0.03), frameMat).translateZ(0.015));
+root.add(new THREE.Mesh(new THREE.BoxGeometry(W, 0.022, 0.03), frameMat).translateZ(0.015));
+APP.scene.add(root);
+const wb = APP.computeBox(root), mxU = APP.applyDissolveShader(root, wb.min.y, wb.max.y, false);
+APP.registerEntity({ name: "wall window", type: "window", root, box: wb, matrixUniforms: mxU, buildDur: 0.9, grabbable: false });
+
+@ability: spawn_portal
+@match: create & portal | portal | اصنع بوابة | اصنع بوابه | بوابة | بوابه
+@code:
+const THREE = APP.THREE;
+let tex = APP.findImage("world.jpg");
+if (!tex) {
+  const cv = document.createElement("canvas"); cv.width = 2048; cv.height = 1024; const g = cv.getContext("2d");
+  const sky = g.createLinearGradient(0, 0, 0, 620);
+  sky.addColorStop(0, "#110a38"); sky.addColorStop(0.55, "#782494"); sky.addColorStop(1, "#ff914d");
+  g.fillStyle = sky; g.fillRect(0, 0, 2048, 620);
+  g.fillStyle = "#ffe099"; g.beginPath(); g.arc(1024, 420, 95, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#160a2e"; for (let i=0;i<24;i++){ g.beginPath(); g.moveTo(i*90,640); g.lineTo(i*90+45,420+(i%4)*48); g.lineTo(i*90+105,640); g.fill(); }
+  tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+}
+const sp = APP.spawnPos(2.1, 0), root = new THREE.Group();
+root.position.set(sp.x, 1.38, sp.z); root.rotation.y = sp.ry;
+const portalUniforms = { uTex: { value: tex }, uTime: { value: 0 }, uOpen: { value: 0 } };
+const portalMat = new THREE.ShaderMaterial({
+  uniforms: portalUniforms, transparent: true, side: THREE.DoubleSide,
+  vertexShader: `uniform float uTime; uniform float uOpen; varying vec3 vW; varying vec2 vUv; void main(){ vUv=uv; vec3 p=position; float r=length(p.xy), a=atan(p.y,p.x); p.xy *= (1.0 + (sin(a*5.0+uTime*3.2)*0.065 + cos(a*3.0-uTime*2.4)*0.05)*smoothstep(0.2,1.0,r))*uOpen; p.z += sin(r*6.0-uTime*4.0)*0.035; vec4 w=modelMatrix*vec4(p,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
+  fragmentShader: `uniform sampler2D uTex; uniform float uTime; varying vec3 vW; varying vec2 vUv; void main(){ vec2 c=vUv*2.0-1.0; float r=length(c), a=atan(c.y,c.x), edge=0.9+0.06*sin(a*6.0+uTime*4.0)+0.04*cos(a*4.0-uTime*3.0); if(r>edge) discard; vec3 d=normalize(vW-cameraPosition); float sw=smoothstep(0.65,edge,r); vec3 wCol=texture2D(uTex, vec2(atan(d.z,d.x)/6.2831853+0.5+sw*0.06*sin(uTime*5.0+a*3.0), asin(clamp(d.y,-0.999,0.999))/3.14159265+0.5)).rgb; vec3 rimCol=mix(vec3(0.0,0.9,1.0), vec3(0.85,0.25,1.0), 0.5+0.5*sin(a*3.0+uTime*4.0)); float rim=smoothstep(edge-0.14,edge,r); gl_FragColor=vec4(mix(wCol, rimCol*2.1, rim), 1.0-smoothstep(edge-0.03,edge,r)); }`
+});
+root.add(new THREE.Mesh(new THREE.CircleGeometry(1.18, 64), portalMat));
+const pLight = new THREE.PointLight(0x66ccff, 2.4, 7.5); pLight.position.set(0, 0, 0.35); root.add(pLight);
+APP.scene.add(root); APP.fx.groundPulse(sp.x, sp.z, 2.5, 0x44ccff);
+const ent = APP.registerEntity({
+  name: "dimensional portal", type: "portal", root, box: APP.computeBox(root), buildDur: 0.1,
+  upd: (dt, t) => {
+    portalUniforms.uTime.value = t; portalUniforms.uOpen.value = Math.min(1, portalUniforms.uOpen.value + dt * 1.1);
+    pLight.intensity = (2.0 + Math.sin(t * 5) * 0.45) * portalUniforms.uOpen.value;
+    if (!ent.dissolveStart && Math.random() < 0.72) {
+      const ang = Math.random() * 6.28, rad = 1.05 * portalUniforms.uOpen.value;
+      const wp = new THREE.Vector3(Math.cos(ang)*rad, Math.sin(ang)*rad, 0.05).applyMatrix4(root.matrixWorld);
+      APP.fx.spawnPoint("glow", wp.x, wp.y, wp.z, 0.85, Math.random() < 0.5 ? 0x00e5ff : 0xcc55ff);
+    }
+  }
+});
+
+@ability: spawn_front_door_world2
+@match: open & front & door | front & door | افتح باب امامي | باب امامي
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+const sp = APP.spawnPos(1.85, 0), root = new THREE.Group();
+root.position.set(sp.x, 0, sp.z); root.rotation.y = sp.ry;
+const doorW = 0.96, doorH = 2.12, frameT = 0.09;
+
+const woodTex = (() => {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 512; const g = c.getContext("2d");
+  g.fillStyle = "#4d2f1c"; g.fillRect(0, 0, 256, 512);
+  for (let i = 0; i < 200; i++) { g.fillStyle = i%2===0 ? "rgba(35,18,8,0.24)" : "rgba(110,70,40,0.16)"; g.fillRect(Math.random()*256, 0, 2+Math.random()*5, 512); }
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+})();
+const oakMat = new THREE.MeshPhysicalMaterial({ map: woodTex, roughness: 0.34, clearcoat: 0.38 });
+const brassMat = new THREE.MeshPhysicalMaterial({ color: 0xd9aa44, metalness: 0.95, roughness: 0.14 });
+
+const leftPost = new THREE.Mesh(new THREE.BoxGeometry(frameT, doorH + frameT, 0.14), oakMat); leftPost.position.set(-doorW/2 - frameT/2, (doorH+frameT)/2, 0); leftPost.castShadow = true; root.add(leftPost);
+const rightPost = new THREE.Mesh(new THREE.BoxGeometry(frameT, doorH + frameT, 0.14), oakMat); rightPost.position.set(doorW/2 + frameT/2, (doorH+frameT)/2, 0); rightPost.castShadow = true; root.add(rightPost);
+const header = new THREE.Mesh(new THREE.BoxGeometry(doorW + frameT*2, frameT, 0.14), oakMat); header.position.set(0, doorH + frameT/2, 0); header.castShadow = true; root.add(header);
+
+const portalMask = new THREE.Mesh(new THREE.PlaneGeometry(doorW, doorH), new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp }));
+portalMask.position.set(0, doorH / 2, -0.02); portalMask.renderOrder = 1; root.add(portalMask);
+
+const worldGroup = new THREE.Group(); worldGroup.position.set(0, 0, -0.05); root.add(worldGroup);
+let world2Loaded = null;
+try { world2Loaded = await new Promise((res, rej) => APP.gltfLoader.load(APP.findGLB("world2.glb"), res, undefined, rej)); }
+catch { try { world2Loaded = await new Promise((res, rej) => APP.gltfLoader.load("./models/world2.glb", res, undefined, rej)); } catch {} }
+
+if (world2Loaded) {
+  const wm = APP.SkeletonUtils.clone(world2Loaded.scene);
+  const wb = APP.computeBox(wm), sz = wb.getSize(new THREE.Vector3()), sc = 8.0 / Math.max(sz.x, sz.z, 0.1);
+  wm.scale.setScalar(sc);
+  const sb = APP.computeBox(wm), c = sb.getCenter(new THREE.Vector3());
+  wm.position.set(-c.x, -sb.min.y, -sb.max.z - 0.15);
+  wm.traverse(o => {
+    if (!o.isMesh) return; o.renderOrder = 2;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => { m.stencilWrite = true; m.stencilRef = 1; m.stencilFunc = THREE.EqualStencilFunc; });
+  });
+  worldGroup.add(wm);
+} else {
+  const skyDome = new THREE.Mesh(new THREE.SphereGeometry(12, 32, 24), new THREE.MeshBasicMaterial({ color: 0x6ba6d9, side: THREE.BackSide, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc }));
+  skyDome.renderOrder = 2;
+  const gFloor = new THREE.Mesh(new THREE.PlaneGeometry(20, 20).rotateX(-Math.PI/2), new THREE.MeshStandardMaterial({ color: 0x3b6340, roughness: 0.85, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc }));
+  gFloor.position.set(0, 0.01, -10); gFloor.renderOrder = 2;
+  worldGroup.add(skyDome, gFloor);
+  APP.say("⚠️ استورد world2.glb في شريط الاستيراد ليظهر داخل الباب");
+}
+
+const hingePivot = new THREE.Group(); hingePivot.position.set(-doorW / 2, 0, 0.01); root.add(hingePivot);
+const doorLeaf = new THREE.Mesh(new THREE.BoxGeometry(doorW, doorH, 0.055), oakMat); doorLeaf.position.set(doorW / 2, doorH / 2, 0); doorLeaf.castShadow = true; hingePivot.add(doorLeaf);
+[0.52, 1.48].forEach(py => { const pnl = new THREE.Mesh(new THREE.BoxGeometry(doorW*0.68, 0.66, 0.072), new THREE.MeshPhysicalMaterial({ map: woodTex, color: 0x3d2415, roughness: 0.4 })); pnl.position.set(doorW/2, py, 0); hingePivot.add(pnl); });
+const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.12, 10), brassMat); handle.rotation.z = Math.PI / 2; handle.position.set(doorW - 0.1, 1.0, 0.055); hingePivot.add(handle);
+
+const ctx = APP.sfx.ctx;
+if (ctx) {
+  const t = ctx.currentTime, o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "triangle"; o.frequency.setValueAtTime(160, t); o.frequency.linearRampToValueAtTime(115, t + 0.9);
+  g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+  o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 1.05);
+}
+
+APP.scene.add(root); APP.fx.groundPulse(sp.x, sp.z, 1.8, 0x00ff88);
+let openProg = 0;
+APP.registerEntity({
+  name: "front door", type: "door", root, box: APP.computeBox(root), buildDur: 0.9,
+  upd: (dt) => {
+    if (openProg < 1) {
+      openProg = Math.min(1, openProg + dt * 0.65);
+      hingePivot.rotation.y = -(1 - Math.pow(1 - openProg, 3)) * 1.65;
+    }
+  }
+});
+
+@ability: change_room_360
+@match: غير الغرفة | غير الغرفه | change & room | room
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+for (const e of APP.entities) if (e.type === "env_360" && !e.dissolveStart) APP.dissolve({ target: e.id, duration: 0.4 });
+let tex = APP.findImage("room.jpg");
+if (!tex) {
+  const cv = document.createElement("canvas"); cv.width = 2048; cv.height = 1024; const g = cv.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, 1024);
+  grad.addColorStop(0, "#121726"); grad.addColorStop(0.5, "#1f2b3d"); grad.addColorStop(1, "#0d1016");
+  g.fillStyle = grad; g.fillRect(0, 0, 2048, 1024);
+  g.strokeStyle = "rgba(0, 255, 170, 0.25)"; g.lineWidth = 3;
+  for (let x = 0; x <= 2048; x += 128) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 1024); g.stroke(); }
+  for (let y = 128; y < 1024; y += 128) { g.beginPath(); g.moveTo(0, y); g.lineTo(2048, y); g.stroke(); }
+  tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+}
+const root = new THREE.Group();
+root.add(new THREE.Mesh(new THREE.SphereGeometry(22, 48, 32), new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide })).translateY(1.5));
+APP.scene.add(root);
+const mxU = APP.applyDissolveShader(root, 0, 14, true);
+APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
+APP.registerEntity({ name: "360 room", type: "env_360", root, box: new THREE.Box3(new THREE.Vector3(-22,-20,-22), new THREE.Vector3(22,24,22)), matrixUniforms: mxU, buildDur: 1.6 });
+
+@ability: wonder_fusion_machine
+@match: الجهاز العجيب | جهاز عجيب | الجهاز | wonder & machine | fusion & device | fusion & machine
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+const sp = APP.spawnPos(1.55, 0);
+const root = new THREE.Group();
+root.position.set(sp.x, 0, sp.z);
+root.rotation.y = sp.ry;
+
+const titanium = new THREE.MeshPhysicalMaterial({ color: 0x262d34, metalness: 0.9, roughness: 0.2, clearcoat: 0.5 });
+const darkSteel = new THREE.MeshPhysicalMaterial({ color: 0x101419, metalness: 0.82, roughness: 0.34 });
+const chromeMat = new THREE.MeshPhysicalMaterial({ color: 0xdbe6ee, metalness: 0.96, roughness: 0.08 });
+const chamberGlass = new THREE.MeshPhysicalMaterial({ color: 0xdcf6ff, roughness: 0.03, metalness: 0.06, clearcoat: 1.0, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide });
+const conduitCyan = new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00aacc, emissiveIntensity: 1.6 });
+const conduitEmerald = new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00cc55, emissiveIntensity: 1.6 });
+
+const base = new THREE.Mesh(new THREE.BoxGeometry(1.98, 0.72, 0.8), darkSteel); base.position.y = 0.36; base.castShadow = base.receiveShadow = true; root.add(base);
+const deck = new THREE.Mesh(new THREE.BoxGeometry(2.04, 0.08, 0.86), titanium); deck.position.y = 0.74; deck.castShadow = true; root.add(deck);
+const consolePanel = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.14, 0.26), titanium); consolePanel.position.set(0, 0.79, 0.38); consolePanel.rotation.x = 0.48; root.add(consolePanel);
+const btnHousing = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.078, 0.035, 24), chromeMat); btnHousing.position.set(0, 0.84, 0.41); btnHousing.rotation.x = 0.48; root.add(btnHousing);
+const btnMat = new THREE.MeshPhysicalMaterial({ color: 0x00ff66, emissive: 0x00cc44, emissiveIntensity: 1.9, roughness: 0.16, clearcoat: 0.9 });
+const greenBtn = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.055, 0.045, 24), btnMat); greenBtn.position.set(0, 0.855, 0.42); greenBtn.rotation.x = 0.48; root.add(greenBtn);
+
+const makeChamber = (cx, cy, r, h, accentMat, isCenter = false) => {
+  const grp = new THREE.Group(); grp.position.set(cx, cy, 0);
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(r + 0.04, r + 0.07, 0.08, 32), chromeMat); pad.position.y = 0.04; grp.add(pad);
+  const topCap = new THREE.Mesh(new THREE.CylinderGeometry(r + 0.05, r + 0.03, 0.09, 32), titanium); topCap.position.y = h + 0.06; grp.add(topCap);
+  const glowRing = new THREE.Mesh(new THREE.TorusGeometry(r, 0.012, 12, 48).rotateX(Math.PI / 2), accentMat.clone()); glowRing.position.y = 0.085; grp.add(glowRing);
+  const scanRing = new THREE.Mesh(new THREE.TorusGeometry(r - 0.015, 0.008, 10, 48).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: isCenter ? 0x00ff88 : 0x00f0ff, transparent: true, opacity: 0 }));
+  scanRing.position.y = 0.15; grp.add(scanRing);
+  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 32, 1, true), chamberGlass); cyl.position.y = h * 0.5 + 0.06; grp.add(cyl);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + 0.5;
+    const strut = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, h + 0.06, 8), darkSteel);
+    strut.position.set(Math.cos(a) * (r + 0.025), h * 0.5 + 0.06, Math.sin(a) * (r + 0.025)); grp.add(strut);
+  }
+  root.add(grp);
+  return { grp, cyl, glowRing, scanRing };
+};
+
+const leftCham   = makeChamber(-0.68, 0.78, 0.28, 0.76, conduitCyan, false);
+const rightCham  = makeChamber( 0.68, 0.78, 0.28, 0.76, conduitCyan, false);
+const centerCham = makeChamber( 0.00, 0.82, 0.34, 0.92, conduitEmerald, true);
+
+for (const sd of [-1, 1]) {
+  const curve = new THREE.CatmullRomCurve3([new THREE.Vector3(sd * 0.68, 1.58, 0), new THREE.Vector3(sd * 0.44, 1.88, 0), new THREE.Vector3(sd * 0.18, 1.84, 0)]);
+  root.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 20, 0.024, 10, false), conduitCyan));
+}
+const coreLight = new THREE.PointLight(0x00ff99, 0.9, 5.5); coreLight.position.set(0, 1.32, 0.1); root.add(coreLight);
+
+APP.scene.add(root);
+const mb = APP.computeBox(root), mxU = APP.applyDissolveShader(root, mb.min.y, mb.max.y, false);
+APP.fx.groundPulse(sp.x, sp.z, 2.2, 0x00ffaa);
+
+let leftObj = null, rightObj = null, fusing = false, fuseT = 0, btnCooldown = 0;
+
+// Semantic Bio-Mechanical Hybrid Synthesizer (e.g. Bird + Horse -> Winged Pegasus with Feathered Tail!)
+const buildSemanticHybrid = (entA, entB, spawnWorldPos) => {
+  const hybridRoot = new THREE.Group();
+  hybridRoot.position.copy(spawnWorldPos);
+
+  const inspectTraits = (ent) => {
+    const nm = (ent.name + " " + (ent.semanticTag || "")).toLowerCase();
+    const isWinged = /bird|butterfly|dragon|eagle|owl|pegasus|plane|طائر|فراش|تنين|wing/.test(nm) || ent.type === "butterfly";
+    const isAquatic = /fish|shark|whale|dolphin|سمك/.test(nm) || ent.type === "fish";
+    const isSoft = !!ent._isSoft || ent.type === "cloth";
+    const isBreakable = !!ent._isVoronoi;
+    const isSnow = !!ent._isSnow;
+
+    const meshes = [];
+    let avgColor = new THREE.Color(0x99aabb), avgMetal = 0, avgRough = 0, cnt = 0, mainTex = null;
+    ent.root.updateMatrixWorld(true);
+    ent.root.traverse(o => {
+      if (!o.isMesh || !o.geometry) return;
+      const g = o.geometry.clone(); g.applyMatrix4(o.matrixWorld);
+      const m = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (m && m.color) { avgColor.add(m.color); cnt++; }
+      if (m && m.metalness !== undefined) avgMetal += m.metalness;
+      if (m && m.roughness !== undefined) avgRough += m.roughness;
+      if (!mainTex && m && m.map) mainTex = m.map;
+      meshes.push({ geo: g, mat: m, name: (o.name || "").toLowerCase() });
+    });
+    if (cnt > 0) { avgColor.multiplyScalar(1 / (cnt + 1)); avgMetal /= cnt; avgRough /= cnt; }
+    else { avgMetal = 0.25; avgRough = 0.45; }
+    const box = APP.computeBox(ent.root), center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+    return { ent, meshes, box, center, size, avgColor, avgMetal, avgRough, mainTex, isWinged, isAquatic, isSoft, isBreakable, isSnow };
+  };
+
+  let tA = inspectTraits(entA), tB = inspectTraits(entB);
+  // Make the larger / quadruped / primary body the host A, and the winged/aquatic/secondary donor B
+  if (tA.isWinged && !tB.isWinged) { const tmp = tA; tA = tB; tB = tmp; }
+
+  const fusedColor = tA.avgColor.clone().lerp(tB.avgColor, 0.42);
+  const fusedMetal = (tA.avgMetal + tB.avgMetal) * 0.5;
+  const fusedRough = Math.max(0.08, (tA.avgRough + tB.avgRough) * 0.5);
+  const scaleA = 0.72 / Math.max(0.1, tA.size.length());
+
+  // 1. Rebuild Host Body A with blended PBR skin/coat/iridescence of B
+  const bodyGrp = new THREE.Group();
+  for (const item of tA.meshes) {
+    item.geo.translate(-tA.center.x, -tA.center.y, -tA.center.z);
+    item.geo.scale(scaleA, scaleA, scaleA);
+    const orig = item.mat;
+    const m = new THREE.MeshPhysicalMaterial({
+      color: orig && orig.color ? orig.color.clone().lerp(tB.avgColor, 0.45) : fusedColor,
+      map: (orig && orig.map) || tB.mainTex || null,
+      metalness: fusedMetal, roughness: fusedRough, clearcoat: 0.55,
+      iridescence: tB.isWinged ? 0.65 : 0.15, sheen: 0.4
+    });
+    const mesh = new THREE.Mesh(item.geo, m); mesh.castShadow = mesh.receiveShadow = true;
+    bodyGrp.add(mesh);
+  }
+  hybridRoot.add(bodyGrp);
+
+  const hostH = tA.size.y * scaleA, hostW = tA.size.x * scaleA, hostD = tA.size.z * scaleA;
+  let animWingR = null, animWingL = null, animTail = null;
+
+  // 2. Semantic Grafting: If Donor B is Winged (bird, butterfly, dragon, plane), graft articulated feathered/iridescent wings & bird tail onto Host A's shoulder & rear sockets!
+  if (tB.isWinged) {
+    const featherTex = (() => {
+      const c = document.createElement("canvas"); c.width = 512; c.height = 512; const g = c.getContext("2d");
+      const gr = g.createLinearGradient(0, 256, 512, 256);
+      gr.addColorStop(0, "#" + tA.avgColor.getHexString());
+      gr.addColorStop(0.5, "#" + fusedColor.getHexString());
+      gr.addColorStop(1, "#" + tB.avgColor.getHexString());
+      g.fillStyle = gr;
+      g.beginPath(); g.moveTo(0, 220); g.quadraticCurveTo(220, 40, 500, 120);
+      for (let f = 0; f < 10; f++) {
+        const y = 135 + f * 32, x = 490 - f * 24;
+        g.lineTo(x, y); g.lineTo(x - 45, y + 14);
+      }
+      g.quadraticCurveTo(160, 420, 0, 310); g.closePath(); g.fill();
+      g.strokeStyle = "rgba(255,255,255,0.22)"; g.lineWidth = 3;
+      for (let f = 0; f < 12; f++) { g.beginPath(); g.moveTo(10, 250); g.lineTo(440 - f * 18, 120 + f * 26); g.stroke(); }
+      const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+    })();
+    const wingMat = new THREE.MeshPhysicalMaterial({
+      map: tB.mainTex || featherTex, color: 0xffffff,
+      roughness: Math.max(0.2, fusedRough), metalness: fusedMetal * 0.7,
+      transparent: true, alphaTest: 0.1, iridescence: 0.75, sheen: 0.7, side: THREE.DoubleSide
+    });
+    const wSpan = Math.max(0.45, hostD * 1.15);
+    const wGeoR = new THREE.PlaneGeometry(wSpan, wSpan * 0.75).rotateX(-Math.PI / 2).translate(wSpan * 0.5, 0, 0);
+    const wGeoL = new THREE.PlaneGeometry(wSpan, wSpan * 0.75).rotateX(-Math.PI / 2).scale(-1, 1, 1).translate(-wSpan * 0.5, 0, 0);
+    animWingR = new THREE.Mesh(wGeoR, wingMat); animWingL = new THREE.Mesh(wGeoL, wingMat);
+    animWingR.position.set(hostW * 0.22, hostH * 0.2, hostD * 0.06);
+    animWingL.position.set(-hostW * 0.22, hostH * 0.2, hostD * 0.06);
+    animWingR.castShadow = animWingL.castShadow = true;
+    hybridRoot.add(animWingR, animWingL);
+
+    // Feathered Bird Tail grafted cleanly at Host rear pelvis
+    const tailGeo = new THREE.PlaneGeometry(hostW * 0.85, hostD * 0.65).rotateX(-Math.PI / 2 + 0.25);
+    animTail = new THREE.Mesh(tailGeo, wingMat);
+    animTail.position.set(0, hostH * 0.06, -hostD * 0.55);
+    hybridRoot.add(animTail);
+  } else {
+    // Extract outer distinctive feature geometry from B (top crest/horns/wheels/fins) and graft seamlessly onto Host A's anatomy
+    const featGrp = new THREE.Group();
+    for (const item of tB.meshes) {
+      const sB = 0.45 / Math.max(0.1, tB.size.length());
+      item.geo.translate(-tB.center.x, -tB.center.y, -tB.center.z);
+      item.geo.scale(sB, sB, sB);
+      const m = new THREE.MeshPhysicalMaterial({
+        color: fusedColor, map: (item.mat && item.mat.map) || tA.mainTex || null,
+        metalness: fusedMetal, roughness: fusedRough, clearcoat: 0.65
+      });
+      const mesh = new THREE.Mesh(item.geo, m); mesh.castShadow = true;
+      featGrp.add(mesh);
+    }
+    featGrp.position.set(0, hostH * 0.24, -hostD * 0.06);
+    hybridRoot.add(featGrp);
+  }
+
+  APP.scene.add(hybridRoot);
+  const hb = APP.computeBox(hybridRoot);
+  const mxU = APP.applyDissolveShader(hybridRoot, hb.min.y, hb.max.y, false);
+
+  const hybridEnt = APP.registerEntity({
+    name: "hybrid " + tA.ent.name + "-" + tB.ent.name, type: "hybrid", root: hybridRoot, box: hb,
+    matrixUniforms: mxU, buildDur: 1.15, grabbable: true, ambientFx: "glow",
+    _isSoft: tA.isSoft || tB.isSoft,
+    _isVoronoi: tA.isBreakable || tB.isBreakable,
+    _isSnow: tA.isSnow || tB.isSnow,
+    upd: (dt, t) => {
+      if (hybridEnt.dissolveStart) return;
+      if (animWingR && animWingL) {
+        const fl = Math.sin(t * 7.5) * 0.68 + 0.15;
+        animWingR.rotation.z = fl; animWingL.rotation.z = -fl;
+        if (animTail) animTail.rotation.x = Math.sin(t * 3.8) * 0.14;
+        if (!hybridEnt.heldBy) hybridRoot.position.y += Math.sin(t * 2.2) * 0.0012;
+      }
+      if (hybridEnt._isSoft && !hybridEnt.heldBy) {
+        const sq = 1 + Math.sin(t * 6.5) * 0.04;
+        hybridRoot.scale.set(1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq));
+      }
+    }
+  });
+  return hybridEnt;
+};
+
+const triggerFusion = () => {
+  if (fusing) return;
+  if (!leftObj || !rightObj) { APP.say("⚠️ ضع غرضاً في الغرفة اليسرى وآخر في اليمنى أولاً"); return; }
+  fusing = true; fuseT = 0;
+  APP.sfx.play("magic");
+  APP.say("🧬 جاري تحليل البنية والخصائص والدمج السحري...");
+
+  const c2 = APP.sfx.ctx;
+  if (c2) {
+    const t = c2.currentTime, o1 = c2.createOscillator(), o2 = c2.createOscillator(), g = c2.createGain();
+    o1.type = "sawtooth"; o1.frequency.setValueAtTime(90, t); o1.frequency.exponentialRampToValueAtTime(680, t + 3.2);
+    o2.type = "sine"; o2.frequency.setValueAtTime(180, t); o2.frequency.exponentialRampToValueAtTime(1120, t + 3.2);
+    g.gain.setValueAtTime(0.001, t); g.gain.linearRampToValueAtTime(0.09, t + 0.4); g.gain.exponentialRampToValueAtTime(0.001, t + 3.4);
+    o1.connect(g); o2.connect(g); g.connect(c2.destination);
+    o1.start(t); o2.start(t); o1.stop(t + 3.45); o2.stop(t + 3.45);
+  }
+};
+
+const offPtr = APP.on("pointerdown", ev => {
+  const hits = ev.ray.intersectObject(greenBtn, false);
+  if (hits.length) { btnCooldown = 0.35; triggerFusion(); ev.handled = true; }
+});
+
+const lWorld = new THREE.Vector3(), rWorld = new THREE.Vector3(), cWorld = new THREE.Vector3(), bWorld = new THREE.Vector3();
+const machEnt = APP.registerEntity({
+  name: "wonder fusion machine", type: "machine", root, box: mb, matrixUniforms: mxU, buildDur: 1.8,
+  upd: (dt) => {
+    if (machEnt.dissolveStart || dt <= 0) return;
+    leftCham.grp.getWorldPosition(lWorld); lWorld.y += 0.32;
+    rightCham.grp.getWorldPosition(rWorld); rWorld.y += 0.32;
+    centerCham.grp.getWorldPosition(cWorld); cWorld.y += 0.42;
+    greenBtn.getWorldPosition(bWorld);
+
+    if (btnCooldown > 0) btnCooldown = Math.max(0, btnCooldown - dt);
+    else {
+      for (const h of APP.hands) {
+        if (h.isDesk) continue;
+        if (h.tipWp.distanceTo(bWorld) < 0.085 || h.wp.distanceTo(bWorld) < 0.1) { btnCooldown = 0.6; triggerFusion(); break; }
+      }
+    }
+    greenBtn.position.y += ((btnCooldown > 0.2 ? 0.832 : 0.855) - greenBtn.position.y) * Math.min(1, dt * 20);
+
+    if (!fusing) {
+      for (const e of APP.entities) {
+        if (e === machEnt || e.dissolveStart || !e.grabbable || e.heldBy || e.type === "hybrid") continue;
+        const ec = APP.computeBox(e.root).getCenter(new THREE.Vector3());
+        if (!leftObj && e !== rightObj && ec.distanceTo(lWorld) < 0.45) {
+          leftObj = e; e.lockedInChamber = true;
+          const b0 = APP.computeBox(e.root), sz = b0.getSize(new THREE.Vector3());
+          if (Math.max(sz.x, sz.y, sz.z) > 0.42) e.root.scale.multiplyScalar(0.38 / Math.max(sz.x, sz.y, sz.z));
+          e.root.position.set(lWorld.x, lWorld.y - 0.16, lWorld.z);
+          APP.sfx.play("magic"); APP.say("📥 تم تثبيت الجسم الأول في الحجرة اليسرى");
+        } else if (!rightObj && e !== leftObj && ec.distanceTo(rWorld) < 0.45) {
+          rightObj = e; e.lockedInChamber = true;
+          const b0 = APP.computeBox(e.root), sz = b0.getSize(new THREE.Vector3());
+          if (Math.max(sz.x, sz.y, sz.z) > 0.42) e.root.scale.multiplyScalar(0.38 / Math.max(sz.x, sz.y, sz.z));
+          e.root.position.set(rWorld.x, rWorld.y - 0.16, rWorld.z);
+          APP.sfx.play("magic"); APP.say("📥 تم تثبيت الجسم الثاني في الحجرة اليمنى — اضغط الزر الأخضر!");
+        }
+      }
+      leftCham.glowRing.material.emissive.setHex(leftObj ? 0x00ff88 : 0x00aacc);
+      rightCham.glowRing.material.emissive.setHex(rightObj ? 0x00ff88 : 0x00aacc);
+    } else {
+      fuseT += dt;
+      if (fuseT < 3.2) {
+        const k = fuseT / 3.2;
+        leftCham.scanRing.material.opacity = rightCham.scanRing.material.opacity = centerCham.scanRing.material.opacity = 0.95;
+        leftCham.scanRing.position.y = rightCham.scanRing.position.y = 0.12 + (0.5 + 0.5 * Math.sin(fuseT * 8)) * 0.62;
+        centerCham.scanRing.position.y = 0.14 + (0.5 + 0.5 * Math.cos(fuseT * 10)) * 0.72;
+        coreLight.intensity = 1.6 + k * 5.2 + Math.random() * 1.5;
+
+        if (leftObj) { leftObj.root.rotation.y += dt * (2 + k * 8); if (leftObj.matrixUniforms) leftObj.matrixUniforms.uProg.value = 1 - k * 0.85; }
+        if (rightObj) { rightObj.root.rotation.y -= dt * (2 + k * 8); if (rightObj.matrixUniforms) rightObj.matrixUniforms.uProg.value = 1 - k * 0.85; }
+
+        if (Math.random() < 0.9) {
+          APP.fx.spawnPoint("glow", lWorld.x + (cWorld.x - lWorld.x) * Math.random(), lWorld.y + 0.25, lWorld.z, 0.8, 0x00f0ff);
+          APP.fx.spawnPoint("glow", rWorld.x + (cWorld.x - rWorld.x) * Math.random(), rWorld.y + 0.25, rWorld.z, 0.8, 0x00ff88);
+          APP.fx.spawnPoint("sparks", cWorld.x, cWorld.y, cWorld.z, 0.9, 0x44ffaa);
+        }
+      } else {
+        leftCham.scanRing.material.opacity = rightCham.scanRing.material.opacity = centerCham.scanRing.material.opacity = 0;
+        coreLight.intensity = 0.9;
+        const srcA = leftObj, srcB = rightObj;
+        leftObj = null; rightObj = null; fusing = false;
+
+        if (srcA && srcB) {
+          const hybridEnt = buildSemanticHybrid(srcA, srcB, cWorld);
+          APP.removeEntity(srcA); APP.removeEntity(srcB);
+          APP.sfx.play("magic");
+          APP.fx.groundPulse(cWorld.x, cWorld.z, 2.5, 0x00ffaa);
+          for (let i = 0; i < 48; i++) APP.fx.spawnPoint("sparks", cWorld.x, cWorld.y, cWorld.z, 1.2, 0x00ff99);
+
+          const ejectDir = new THREE.Vector3(0, 0, 1).applyQuaternion(root.quaternion).normalize();
+          const ejectTarget = cWorld.clone().addScaledVector(ejectDir, 0.75).setY(1.25);
+          APP.onTick("eject_" + hybridEnt.id, 1.15, (edt) => {
+            if (!hybridEnt.heldBy) {
+              hybridEnt.root.position.lerp(ejectTarget, Math.min(1, edt * 4.5));
+              hybridEnt.root.rotation.y += edt * 1.4;
+            }
+          });
+          APP.say("✨ تم الدمج السحري: " + hybridEnt.name);
+        }
+      }
+    }
+  },
+  dispose: () => offPtr()
+});
+
+@ability: dynamic_glb_spawner
+@fallback
+@match: اظهر | أظهر | اصنع | show | spawn | create | هات | جيب
+@code:
+const file = APP.resolveGLB(text);
+await APP.spawnGLB({ file, name: file.replace(".glb", ""), height: 1.45, dist: 2.2 });

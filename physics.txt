@@ -1,0 +1,577 @@
+# ==============================================================================
+# DEVELOPER NOTE (physics.txt):
+# Unified physics simulation engine: rigidbodies, softbodies (اجعله طري),
+# Voronoi breakable fracturing (اجعله يتحطم), granular snow/fluid (اجعله مائع),
+# automatic SkinnedMesh ragdolls on grab, and room wall/floor collisions.
+# ==============================================================================
+
+@ability: module_physics_world
+@autorun
+@code:
+const THREE = APP.THREE;
+const bodies = [];
+
+APP._phys = {
+  bodies,
+  register(ent, mode = "rigid", extra = {}) {
+    let b = bodies.find(x => x.ent === ent);
+    if (b) { b.mode = mode; Object.assign(b, extra); return b; }
+    const box = APP.computeBox(ent.root);
+    const r = Math.max(0.14, box.getSize(new THREE.Vector3()).length() * 0.34);
+    b = Object.assign({
+      ent, mode, vel: new THREE.Vector3(), angVel: new THREE.Vector3(),
+      radius: r, mass: Math.max(0.5, r * 4), restitution: 0.35, onImpact: null
+    }, extra);
+    ent._physBody = b;
+    bodies.push(b);
+    return b;
+  },
+  remove(ent) {
+    const idx = bodies.findIndex(b => b.ent === ent);
+    if (idx >= 0) bodies.splice(idx, 1);
+  },
+  applyImpulse(ent, vec) {
+    const b = bodies.find(x => x.ent === ent) || APP._phys.register(ent, "rigid");
+    b.vel.add(vec);
+  }
+};
+
+// Coupled Simulation Loop: Rigid <-> Softbody <-> Voronoi <-> Snow <-> Scanned Room <-> Water
+APP.onTick("mod_physics_world", 0, (dt) => {
+  if (dt <= 0) return;
+  const h = Math.min(dt, 0.032);
+  const walls = APP.roomPlanes.filter(p => p.kind === "wall");
+  const bounds = APP.roomBounds;
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of bounds) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+  }
+  const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart);
+  const tk = tank ? tank.tankData : null;
+
+  // Clean up dissolved bodies
+  for (let i = bodies.length - 1; i >= 0; i--) {
+    if (!bodies[i].ent.root.parent || bodies[i].ent.dissolveStart) bodies.splice(i, 1);
+  }
+
+  for (let i = 0; i < bodies.length; i++) {
+    const b = bodies[i], ent = b.ent;
+    if (ent.heldBy || ent.lockedInChamber || ent._isRagdollActive) continue;
+
+    // 1. Gravity + Buoyancy in Water Tank
+    b.vel.y += APP.worldG * h;
+    if (tk && Math.abs(ent.root.position.x - tk.cx) < tk.halfW - 0.06 && Math.abs(ent.root.position.z - tk.cz) < tk.halfD - 0.06) {
+      const box = APP.computeBox(ent.root);
+      if (box.min.y < tk.waterY) {
+        const sub = Math.min(1, (tk.waterY - box.min.y) / Math.max(0.1, box.max.y - box.min.y));
+        b.vel.y += (-APP.worldG * 1.45 * sub) * h;
+        b.vel.multiplyScalar(1 - 3.5 * h * sub);
+        if (!b._inWater) {
+          b._inWater = true;
+          if (APP._splashWater) APP._splashWater(ent.root.position.x, ent.root.position.z, Math.min(0.06, 0.015 + b.vel.length() * 0.012), true);
+          APP.sfx.play("splash");
+        }
+        if (box.min.y < tk.baseY + 0.02) { ent.root.position.y += (tk.baseY + 0.02 - box.min.y); b.vel.y = Math.max(0, b.vel.y); }
+      } else b._inWater = false;
+    } else b._inWater = false;
+
+    ent.root.position.addScaledVector(b.vel, h);
+    if (b.angVel.lengthSq() > 1e-4) {
+      ent.root.rotation.x += b.angVel.x * h;
+      ent.root.rotation.y += b.angVel.y * h;
+      ent.root.rotation.z += b.angVel.z * h;
+      b.angVel.multiplyScalar(0.97);
+    }
+
+    // 2. Floor & Ceiling Collisions
+    const box = APP.computeBox(ent.root);
+    if (box.min.y < 0) {
+      const spd = Math.abs(b.vel.y);
+      ent.root.position.y += -box.min.y;
+      if (b.onImpact && spd > 1.35) b.onImpact(spd, new THREE.Vector3(0, 1, 0));
+      b.vel.y = Math.abs(b.vel.y) > 0.35 ? -b.vel.y * b.restitution : 0;
+      b.vel.x *= 0.86; b.vel.z *= 0.86;
+      if (b.onFloorSquash && spd > 0.5) b.onFloorSquash(spd);
+    }
+
+    // 3. Scanned Room Wall Collisions
+    const c = box.getCenter(new THREE.Vector3());
+    if (walls.length) {
+      for (const w of walls) {
+        const n = w.normal.clone();
+        if (n.dot(APP.headPos.clone().sub(w.pos)) < 0) n.negate();
+        const local = c.clone().sub(w.pos).applyQuaternion(w.quat.clone().invert());
+        if (Math.abs(local.x) < w.w * 0.58 && Math.abs(local.z) < w.h * 0.58) {
+          const signed = c.clone().sub(w.pos).dot(n);
+          if (signed < b.radius && signed > -0.7) {
+            ent.root.position.addScaledVector(n, b.radius - signed);
+            const vn = b.vel.dot(n);
+            if (vn < 0) {
+              if (b.onImpact && Math.abs(vn) > 1.35) b.onImpact(Math.abs(vn), n);
+              b.vel.addScaledVector(n, -(1 + b.restitution) * vn);
+            }
+          }
+        }
+      }
+    } else if (isFinite(minX)) {
+      if (box.min.x < minX) { ent.root.position.x += minX - box.min.x; b.vel.x = Math.abs(b.vel.x) * b.restitution; }
+      if (box.max.x > maxX) { ent.root.position.x -= box.max.x - maxX; b.vel.x = -Math.abs(b.vel.x) * b.restitution; }
+      if (box.min.z < minZ) { ent.root.position.z += minZ - box.min.z; b.vel.z = Math.abs(b.vel.z) * b.restitution; }
+      if (box.max.z > maxZ) { ent.root.position.z -= box.max.z - maxZ; b.vel.z = -Math.abs(b.vel.z) * b.restitution; }
+    }
+
+    // 4. Hand Push / Strike Interaction
+    for (const hd of APP.hands) {
+      if (hd.isDesk) continue;
+      const dist = hd.tipWp.distanceTo(c);
+      if (dist < b.radius + 0.08 && hd.vel.length() > 0.35) {
+        const push = c.clone().sub(hd.tipWp).normalize();
+        const imp = hd.vel.length() * 0.65;
+        b.vel.addScaledVector(push, imp);
+        if (b.onImpact && imp > 1.4) b.onImpact(imp, push);
+        if (b.onPoke) b.onPoke(hd.tipWp, hd.vel);
+      }
+    }
+
+    // 5. Object-to-Object Cross-Collisions
+    for (let j = i + 1; j < bodies.length; j++) {
+      const b2 = bodies[j], ent2 = b2.ent;
+      if (ent2.heldBy || ent2.lockedInChamber) continue;
+      const c2 = APP.computeBox(ent2.root).getCenter(new THREE.Vector3());
+      const diff = c.clone().sub(c2), d = diff.length(), minD = (b.radius + b2.radius) * 0.85;
+      if (d < minD && d > 1e-5) {
+        diff.divideScalar(d);
+        const pen = (minD - d) * 0.5;
+        ent.root.position.addScaledVector(diff, pen);
+        ent2.root.position.addScaledVector(diff, -pen);
+        const relV = b.vel.clone().sub(b2.vel), vn = relV.dot(diff);
+        if (vn < 0) {
+          const imp = -vn * 0.7;
+          b.vel.addScaledVector(diff, imp); b2.vel.addScaledVector(diff, -imp);
+          if (b.onImpact && Math.abs(vn) > 1.45) b.onImpact(Math.abs(vn), diff);
+          if (b2.onImpact && Math.abs(vn) > 1.45) b2.onImpact(Math.abs(vn), diff.clone().negate());
+          if (b.onPoke) b.onPoke(c2, b2.vel);
+          if (b2.onPoke) b2.onPoke(c, b.vel);
+        }
+      }
+    }
+  }
+}, null, true);
+
+@ability: module_ragdoll_on_grab
+@autorun
+@code:
+const THREE = APP.THREE;
+const activeRagdolls = new Map();
+
+APP.on("entitygrabbed", ({ hand, ent }) => {
+  if (!ent || !ent.root) return;
+  let skinned = null;
+  ent.root.traverse(o => { if (!skinned && o.isSkinnedMesh && o.skeleton && o.skeleton.bones.length >= 3) skinned = o; });
+  if (!skinned) return;
+
+  ent._isRagdollActive = true;
+  if (ent.mixer) ent.mixer.timeScale = 0;
+
+  const bones = skinned.skeleton.bones;
+  const simNodes = bones.map(bone => {
+    const wp = new THREE.Vector3();
+    bone.getWorldPosition(wp);
+    const parentIdx = bone.parent && bone.parent.isBone ? bones.indexOf(bone.parent) : -1;
+    const restQ = bone.quaternion.clone();
+    let restLen = 0.12;
+    if (parentIdx >= 0) {
+      const pp = new THREE.Vector3(); bones[parentIdx].getWorldPosition(pp);
+      restLen = Math.max(0.03, wp.distanceTo(pp));
+    }
+    return { bone, p: wp.clone(), q: wp.clone(), parentIdx, restLen, restQ };
+  });
+
+  activeRagdolls.set(ent, { ent, skinned, simNodes });
+  APP.say("🦴 تفعيل فيزياء الدمية (Ragdoll) للمجسم");
+});
+
+APP.on("entityreleased", ({ ent }) => {
+  const rd = activeRagdolls.get(ent);
+  if (!rd) return;
+  // Let ragdoll settle for 1.5s then hand back to physics world
+  setTimeout(() => {
+    ent._isRagdollActive = false;
+    activeRagdolls.delete(ent);
+    if (APP._phys) APP._phys.register(ent, "rigid");
+  }, 1400);
+});
+
+APP.onTick("mod_ragdoll_sim", 0, (dt) => {
+  if (dt <= 0 || !activeRagdolls.size) return;
+  const h = Math.min(dt, 0.03), grav = APP.worldG * h * h;
+  const tmpP = new THREE.Vector3(), tmpDir = new THREE.Vector3(), tmpLocal = new THREE.Vector3();
+
+  for (const { ent, simNodes } of activeRagdolls.values()) {
+    if (!ent.root.parent || ent.dissolveStart) { activeRagdolls.delete(ent); continue; }
+    for (let i = 0; i < simNodes.length; i++) {
+      const n = simNodes[i];
+      if (n.parentIdx < 0) {
+        n.bone.getWorldPosition(n.p);
+        n.q.copy(n.p);
+        continue;
+      }
+      const vx = (n.p.x - n.q.x) * 0.94, vy = (n.p.y - n.q.y) * 0.94, vz = (n.p.z - n.q.z) * 0.94;
+      n.q.copy(n.p);
+      n.p.x += vx; n.p.y += vy + grav; n.p.z += vz;
+      if (n.p.y < 0.03) n.p.y = 0.03;
+    }
+    // Distance constraints along bone chain
+    for (let it = 0; it < 5; it++) {
+      for (let i = 1; i < simNodes.length; i++) {
+        const n = simNodes[i]; if (n.parentIdx < 0) continue;
+        const par = simNodes[n.parentIdx];
+        tmpDir.copy(n.p).sub(par.p);
+        const d = tmpDir.length() || 1e-6;
+        const diff = (d - n.restLen) / d;
+        if (par.parentIdx < 0) n.p.addScaledVector(tmpDir, -diff);
+        else { n.p.addScaledVector(tmpDir, -diff * 0.65); par.p.addScaledVector(tmpDir, diff * 0.35); }
+      }
+    }
+    // Apply simulated bone world positions back to local rotations for realistic limb dangle
+    for (let i = 1; i < simNodes.length; i++) {
+      const n = simNodes[i]; if (n.parentIdx < 0) continue;
+      const par = simNodes[n.parentIdx];
+      tmpDir.copy(n.p).sub(par.p).normalize();
+      if (par.bone.parent) {
+        par.bone.parent.updateMatrixWorld(true);
+        const invQ = new THREE.Quaternion();
+        par.bone.parent.getWorldQuaternion(invQ).invert();
+        tmpLocal.copy(tmpDir).applyQuaternion(invQ);
+        const aimQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), tmpLocal);
+        par.bone.quaternion.slerp(n.restQ.clone().slerp(aimQ, 0.55), Math.min(1, dt * 14));
+      }
+    }
+  }
+}, null, true);
+
+@ability: make_softbody
+@match: softbody | squishy | jelly | اجعله طري | طري
+@code:
+const THREE = APP.THREE;
+const ent = APP.entities.find(e => e.heldBy && !e.dissolveStart) || APP.findEntities("last")[0];
+if (!ent) return;
+APP.sfx.play("magic");
+
+const box = APP.computeBox(ent.root), sz = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+// Store rest local vertex positions for all meshes so we can elastically deform the mesh itself!
+const meshData = [];
+ent.root.traverse(o => {
+  if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+  const pos = o.geometry.attributes.position;
+  const rest = new Float32Array(pos.array);
+  o.geometry.computeBoundingBox();
+  meshData.push({ mesh: o, pos, rest, minY: o.geometry.boundingBox.min.y, maxY: o.geometry.boundingBox.max.y });
+});
+
+// 2-axis volumetric jiggle spring oscillators (squash Y + shear X/Z)
+let squash = 0, squashV = -2.2, shearX = 0, shearXV = 0, shearZ = 0, shearZV = 0;
+const body = APP._phys.register(ent, "softbody", {
+  restitution: 0.62,
+  onFloorSquash(spd) { squashV -= Math.min(8, spd * 2.5); },
+  onPoke(pt, vel) {
+    squashV -= 3.0;
+    shearXV += (vel.x || (Math.random()-0.5)*2) * 1.4;
+    shearZV += (vel.z || (Math.random()-0.5)*2) * 1.4;
+    APP.sfx.play("splash");
+  }
+});
+ent.traits = Object.assign(ent.traits || {}, { softbody: true });
+APP.fx.groundPulse(center.x, center.z, 1.6, 0x00ffaa);
+
+APP.onTick("softbody_" + ent.id, 0, (dt, t) => {
+  if (!ent.root.parent || ent.dissolveStart) { APP.stopTick("softbody_" + ent.id); return; }
+  const h = Math.min(dt, 0.032), k = 155, damp = 6.2;
+  squashV += (-k * squash - damp * squashV) * h; squash += squashV * h;
+  shearXV += (-k * shearX - damp * shearXV) * h; shearX += shearXV * h;
+  shearZV += (-k * shearZ - damp * shearZV) * h; shearZ += shearZV * h;
+
+  const sy = Math.max(0.55, Math.min(1.45, 1 + squash * 0.28));
+  const sxz = 1 / Math.sqrt(sy); // Volume preservation!
+
+  for (const md of meshData) {
+    const arr = md.pos.array, rest = md.rest, span = Math.max(0.01, md.maxY - md.minY);
+    for (let i = 0; i < arr.length; i += 3) {
+      const rx = rest[i], ry = rest[i + 1], rz = rest[i + 2];
+      const u = (ry - md.minY) / span; // 0 at base, 1 at top
+      const bulge = sxz + (1 - sxz) * Math.abs(u - 0.5) * 0.6;
+      arr[i]     = rx * bulge + shearX * u * 0.25;
+      arr[i + 1] = md.minY + (ry - md.minY) * sy;
+      arr[i + 2] = rz * bulge + shearZ * u * 0.25;
+    }
+    md.pos.needsUpdate = true;
+    md.mesh.geometry.computeVertexNormals();
+  }
+});
+APP.say("🫧 الجسم أصبح طرياً ومرناً (Softbody)");
+
+@ability: make_breakable_voronoi
+@match: voronoi | breakable | shatter | اجعله يتحطم | يتحطم | قابل للكسر
+@code:
+const THREE = APP.THREE;
+const ent = APP.entities.find(e => e.heldBy && !e.dissolveStart) || APP.findEntities("last")[0];
+if (!ent) return;
+APP.sfx.play("magic");
+
+const box = APP.computeBox(ent.root), center = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+const N_CELLS = 26;
+const seeds = Array.from({ length: N_CELLS }, () => new THREE.Vector3(
+  box.min.x + Math.random() * sz.x,
+  box.min.y + Math.random() * sz.y,
+  box.min.z + Math.random() * sz.z
+));
+
+// Partition triangles into real 3D Voronoi cells
+const cells = seeds.map(() => ({ pos: [], norm: [], uv: [], mat: null }));
+const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), triC = new THREE.Vector3();
+const n0 = new THREE.Vector3(), n1 = new THREE.Vector3(), n2 = new THREE.Vector3();
+ent.root.updateMatrixWorld(true);
+ent.root.traverse(o => {
+  if (!o.isMesh || !o.geometry) return;
+  const g = o.geometry, pos = g.attributes.position, norm = g.attributes.normal, uv = g.attributes.uv, idx = g.index;
+  if (!pos) return;
+  const triCount = idx ? idx.count / 3 : pos.count / 3;
+  const nMat = new THREE.Matrix3().getNormalMatrix(o.matrixWorld);
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idx ? idx.getX(t * 3) : t * 3, i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1, i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+    v0.fromBufferAttribute(pos, i0).applyMatrix4(o.matrixWorld);
+    v1.fromBufferAttribute(pos, i1).applyMatrix4(o.matrixWorld);
+    v2.fromBufferAttribute(pos, i2).applyMatrix4(o.matrixWorld);
+    triC.copy(v0).add(v1).add(v2).multiplyScalar(1 / 3);
+    let best = 0, bd = Infinity;
+    for (let s = 0; s < N_CELLS; s++) { const d = triC.distanceToSquared(seeds[s]); if (d < bd) { bd = d; best = s; } }
+    const cell = cells[best];
+    if (!cell.mat) cell.mat = Array.isArray(o.material) ? o.material[0].clone() : o.material.clone();
+    cell.pos.push(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z);
+    if (norm) {
+      n0.fromBufferAttribute(norm, i0).applyMatrix3(nMat).normalize();
+      n1.fromBufferAttribute(norm, i1).applyMatrix3(nMat).normalize();
+      n2.fromBufferAttribute(norm, i2).applyMatrix3(nMat).normalize();
+      cell.norm.push(n0.x, n0.y, n0.z, n1.x, n1.y, n1.z, n2.x, n2.y, n2.z);
+    }
+    if (uv) {
+      cell.uv.push(uv.getX(i0), uv.getY(i0), uv.getX(i1), uv.getY(i1), uv.getX(i2), uv.getY(i2));
+    }
+  }
+});
+
+// Subtle crystalline fracture glow edge on armed object
+ent.root.traverse(o => {
+  if (o.isMesh && o.material && o.material.emissive) { o.material.emissive.setHex(0x004422); o.material.emissiveIntensity = 0.45; }
+});
+APP.fx.groundPulse(center.x, center.z, 1.5, 0x00ffaa);
+
+let shattered = false;
+const shatterNow = (impactSpd = 2.0) => {
+  if (shattered) return;
+  shattered = true;
+  // Glass/Stone Fracture Audio
+  const ctx = APP.sfx.ctx;
+  if (ctx) {
+    const t = ctx.currentTime, len = Math.floor(ctx.sampleRate * 0.45), buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.08));
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 950;
+    const gn = ctx.createGain(); gn.gain.value = 0.28;
+    src.connect(hp).connect(gn).connect(ctx.destination); src.start(t);
+  }
+  const curCenter = APP.computeBox(ent.root).getCenter(new THREE.Vector3());
+  APP.removeEntity(ent);
+  APP.fx.spawnBox(box, "sparks", 36);
+  APP.fx.spawnBox(box, "smoke", 18);
+
+  for (let s = 0; s < cells.length; s++) {
+    const c = cells[s];
+    if (c.pos.length < 9) continue;
+    const cg = new THREE.BufferGeometry();
+    cg.setAttribute("position", new THREE.Float32BufferAttribute(c.pos, 3));
+    if (c.norm.length === c.pos.length) cg.setAttribute("normal", new THREE.Float32BufferAttribute(c.norm, 3));
+    else cg.computeVertexNormals();
+    if (c.uv.length) cg.setAttribute("uv", new THREE.Float32BufferAttribute(c.uv, 2));
+    cg.computeBoundingBox();
+    const sc = cg.boundingBox.getCenter(new THREE.Vector3());
+    cg.translate(-sc.x, -sc.y, -sc.z);
+
+    const shardMat = c.mat || new THREE.MeshPhysicalMaterial({ color: 0x8899aa, roughness: 0.4 });
+    shardMat.side = THREE.DoubleSide;
+    const shardMesh = new THREE.Mesh(cg, shardMat);
+    shardMesh.castShadow = shardMesh.receiveShadow = true;
+    const shardRoot = new THREE.Group();
+    shardRoot.add(shardMesh);
+    shardRoot.position.copy(sc).add(curCenter.clone().sub(center));
+    APP.scene.add(shardRoot);
+
+    const mxU = APP.applyDissolveShader(shardRoot, 0, 2, false); mxU.uProg.value = 1;
+    const shardEnt = APP.registerEntity({
+      name: "voronoi shard", type: "shard", root: shardRoot, box: APP.computeBox(shardRoot),
+      matrixUniforms: mxU, buildDur: 0.01, grabbable: true
+    });
+    const outDir = sc.clone().sub(center).normalize();
+    if (outDir.lengthSq() < 0.01) outDir.set(Math.random()-0.5, 1, Math.random()-0.5).normalize();
+    APP._phys.register(shardEnt, "rigid", {
+      vel: outDir.multiplyScalar(1.2 + Math.min(3.5, impactSpd * 0.7)).add(new THREE.Vector3(0, 1.1 + Math.random(), 0)),
+      angVel: new THREE.Vector3((Math.random()-0.5)*7, (Math.random()-0.5)*7, (Math.random()-0.5)*7),
+      restitution: 0.28
+    });
+  }
+  APP.say("💥 تحطم الجسم إلى شظايا Voronoi!");
+};
+
+APP._phys.register(ent, "rigid", {
+  onImpact(spd) { shatterNow(spd); },
+  onPoke(pt, vel) { if (vel.length() > 0.85) shatterNow(vel.length() * 1.5); }
+});
+APP.say("💎 الجسم جاهز للتحطم (ارمه أو اضربه بيدك)");
+
+@ability: make_granular_fluid
+@match: fluid | snow | melt | اجعله مائع | مائع | ثلج ناعم
+@code:
+const THREE = APP.THREE;
+const ent = APP.entities.find(e => e.heldBy && !e.dissolveStart) || APP.findEntities("last")[0];
+if (!ent) return;
+APP.sfx.play("magic");
+
+const box = APP.computeBox(ent.root), c0 = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+const pts = [];
+const v = new THREE.Vector3();
+let baseCol = new THREE.Color(0xdff4ff);
+ent.root.updateMatrixWorld(true);
+ent.root.traverse(o => {
+  if (!o.isMesh || !o.geometry) return;
+  const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+  if (mat && mat.color) baseCol = mat.color.clone().lerp(new THREE.Color(0xeef8ff), 0.35);
+  const pos = o.geometry.attributes.position; if (!pos) return;
+  const step = Math.max(1, Math.floor(pos.count / 120));
+  for (let i = 0; i < pos.count && pts.length < 360; i += step) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+    pts.push({ p: v.clone(), v: new THREE.Vector3((Math.random()-0.5)*0.2, 0, (Math.random()-0.5)*0.2), r: 0.024 + Math.random()*0.01 });
+  }
+});
+if (pts.length < 40) {
+  for (let i = 0; i < 260; i++) pts.push({ p: new THREE.Vector3(box.min.x+Math.random()*sz.x, box.min.y+Math.random()*sz.y, box.min.z+Math.random()*sz.z), v: new THREE.Vector3(), r: 0.025 });
+}
+APP.removeEntity(ent);
+
+const gGeo = new THREE.IcosahedronGeometry(0.028, 1);
+const gMat = new THREE.MeshPhysicalMaterial({ color: baseCol, roughness: 0.62, sheen: 0.9, clearcoat: 0.15 });
+const inst = new THREE.InstancedMesh(gGeo, gMat, pts.length);
+inst.castShadow = inst.receiveShadow = true;
+const root = new THREE.Group(); root.add(inst); APP.scene.add(root);
+const dummy = new THREE.Object3D();
+
+const snowEnt = APP.registerEntity({
+  name: "granular snow", type: "snow", root, box, buildDur: 0.05,
+  upd: (dt) => {
+    if (dt <= 0) return;
+    const h = Math.min(dt, 0.028);
+    const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart);
+    const tk = tank ? tank.tankData : null;
+
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      a.v.y += APP.worldG * h;
+      a.p.addScaledVector(a.v, h);
+      if (a.p.y < a.r) { a.p.y = a.r; a.v.y = 0; a.v.x *= 0.72; a.v.z *= 0.72; }
+
+      // Neighbor granular stacking & cohesion
+      for (let j = i + 1; j < pts.length; j += 2) {
+        const b = pts[j], dx = a.p.x - b.p.x, dy = a.p.y - b.p.y, dz = a.p.z - b.p.z;
+        const d2 = dx*dx + dy*dy + dz*dz, md = a.r + b.r;
+        if (d2 < md * md && d2 > 1e-7) {
+          const d = Math.sqrt(d2), push = (md - d) / d * 0.45;
+          a.p.x += dx*push; a.p.y += dy*push; a.p.z += dz*push;
+          b.p.x -= dx*push; b.p.y -= dy*push; b.p.z -= dz*push;
+          a.v.lerp(b.v, 0.08);
+        }
+      }
+
+      // Scoop/push with VR hands
+      for (const hd of APP.hands) {
+        if (hd.isDesk) continue;
+        const d = a.p.distanceTo(hd.tipWp);
+        if (d < 0.14) {
+          const dir = a.p.clone().sub(hd.tipWp).normalize();
+          a.p.copy(hd.tipWp).addScaledVector(dir, 0.14);
+          a.v.addScaledVector(hd.vel, 0.55);
+        }
+      }
+
+      // Collide with rigidbodies & softbodies
+      if (APP._phys) {
+        for (const pb of APP._phys.bodies) {
+          const bc = APP.computeBox(pb.ent.root).getCenter(new THREE.Vector3());
+          const d = a.p.distanceTo(bc);
+          if (d < pb.radius) {
+            const dir = a.p.clone().sub(bc).normalize();
+            a.p.copy(bc).addScaledVector(dir, pb.radius);
+            a.v.addScaledVector(pb.vel, 0.4);
+          }
+        }
+      }
+
+      // Splash & float on water tank
+      if (tk && Math.abs(a.p.x - tk.cx) < tk.halfW && Math.abs(a.p.z - tk.cz) < tk.halfD && a.p.y < tk.waterY) {
+        a.p.y = tk.waterY; a.v.y = 0.05; a.v.x *= 0.85; a.v.z *= 0.85;
+        if (Math.random() < 0.03 && APP._splashWater) APP._splashWater(a.p.x, a.p.z, 0.004, false);
+      }
+
+      dummy.position.copy(a.p); dummy.scale.setScalar(a.r / 0.025); dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+  }
+});
+APP.say("❄️ تحول الجسم إلى مادة مائعة شبيهة بالثلج");
+
+@ability: zero_gravity
+@match: zero & gravity | انزع الجاذبية | انزع الجاذبيه | ان ع الجاذبية | ان ع الجاذبيه
+@code:
+APP._keepStrokeGravity = false;
+APP._nextStrokeGravity = false;
+APP.worldG = 0;
+APP.sfx.play("magic");
+for (const e of APP.entities) {
+  if (!e.dissolveStart && e.grabbable) { e.physBob = 0.045; e.baseY = e.root.position.y; APP.fx.spawnBox(APP.computeBox(e.root), "glow", 10); }
+}
+APP.say("🪐 انعدام الجاذبية");
+
+@ability: scan_room
+@match: scan & room | scan & the & room | مسح الغرفة | امسح الغرفة
+@code:
+const THREE = APP.THREE;
+APP.sfx.play("build");
+await APP.requestRoomScan();
+const walls = APP.roomPlanes.filter(p => p.kind === "wall");
+const bounds = APP.roomBounds;
+let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+for (const p of bounds) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z; }
+
+const scanGroup = new THREE.Group();
+const wireMat = new THREE.MeshBasicMaterial({ color: 0x00ffaa, wireframe: true, transparent: true, opacity: 0.45 });
+const floorGrid = new THREE.Mesh(new THREE.PlaneGeometry(maxX - minX, maxZ - minZ, 16, 16).rotateX(-Math.PI / 2), wireMat);
+floorGrid.position.set((minX + maxX) / 2, 0.02, (minZ + maxZ) / 2); scanGroup.add(floorGrid);
+
+if (walls.length) {
+  for (const w of walls) {
+    const wm = new THREE.Mesh(new THREE.PlaneGeometry(w.w, w.h, 8, 6), wireMat);
+    wm.position.copy(w.pos); wm.quaternion.copy(w.quat); wm.rotateX(Math.PI / 2); scanGroup.add(wm);
+  }
+} else {
+  for (let i = 0; i < bounds.length; i++) {
+    const a = bounds[i], b = bounds[(i + 1) % bounds.length];
+    const wm = new THREE.Mesh(new THREE.PlaneGeometry(a.distanceTo(b), 2.6, 10, 6), wireMat);
+    wm.position.set((a.x + b.x) / 2, 1.3, (a.z + b.z) / 2);
+    wm.lookAt((a.x + b.x) / 2 - (b.z - a.z), 1.3, (a.z + b.z) / 2 + (b.x - a.x));
+    scanGroup.add(wm);
+  }
+}
+APP.scene.add(scanGroup); APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 4.5, 0x00ffaa);
+let age = 0;
+APP.onTick("scan_vis_" + Date.now(), 3.8, (dt) => { age += dt; wireMat.opacity = Math.max(0, 0.45 * (1 - Math.max(0, age - 2.0) / 1.8)); }, () => APP.scene.remove(scanGroup));
+APP.say("📡 تم مسح الجدران والأرضية");
