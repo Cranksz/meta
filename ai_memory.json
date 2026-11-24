@@ -42,6 +42,19 @@
         "preferredParams": {},
         "count": 1,
         "lastUpdated": "2026-11-24T23:36:17.962Z"
+      },
+      "magic pen": {
+        "target": "magic pen",
+        "likes": [],
+        "dislikes": [
+          "ink still not appearing with magic pen"
+        ],
+        "notes": [
+          "ink still not appearing with magic pen"
+        ],
+        "preferredParams": {},
+        "count": 1,
+        "lastUpdated": "2026-11-24T23:36:30.373Z"
       }
     },
     "effects": {},
@@ -58,6 +71,16 @@
       "confidence": 0.57,
       "autoApplied": false,
       "updatedAt": "2026-11-24T23:36:17.962Z"
+    },
+    {
+      "key": "objects:magic pen",
+      "category": "objects",
+      "target": "magic pen",
+      "evidenceCount": 1,
+      "summary": "ink still not appearing with magic pen",
+      "confidence": 0.57,
+      "autoApplied": false,
+      "updatedAt": "2026-11-24T23:36:30.373Z"
     }
   ],
   "recentFeedbackLog": [
@@ -67,6 +90,13 @@
       "target": "pen",
       "sentiment": "negative",
       "summary": "ink not appearing"
+    },
+    {
+      "time": "2026-11-24T23:36:30.373Z",
+      "category": "objects",
+      "target": "magic pen",
+      "sentiment": "negative",
+      "summary": "ink still not appearing with magic pen"
     }
   ]
 }
