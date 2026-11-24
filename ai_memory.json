@@ -27,7 +27,9 @@
     "APP.sfx.play(\"build\"|\"burn\"|\"delete\"|\"magic\"|\"click\"|\"shatter\"|\"soft\"|\"splash\")",
     "APP.on(event, fn), APP.emit(event, data), APP.onTick(id, dur, fn, onEnd, persistent), APP.stopTick(id), APP.say(msg)"
   ],
-  "learnedRules": [],
+  "learnedRules": [
+    "Always make sure new pen objects are initialized with active drawing capabilities."
+  ],
   "userPreferences": {
     "objects": {
       "pen": {
@@ -72,6 +74,19 @@
         "preferredParams": {},
         "count": 1,
         "lastUpdated": "2026-11-24T23:36:47.673Z"
+      },
+      "sphere_ai_companion": {
+        "target": "sphere_ai_companion",
+        "likes": [],
+        "dislikes": [
+          "User is correcting my understanding; they asked about time, not cancellation."
+        ],
+        "notes": [
+          "User is correcting my understanding; they asked about time, not cancellation."
+        ],
+        "preferredParams": {},
+        "count": 1,
+        "lastUpdated": "2026-11-24T23:39:13.543Z"
       }
     }
   },
@@ -83,7 +98,7 @@
       "evidenceCount": 1,
       "summary": "ink not appearing",
       "confidence": 0.57,
-      "autoApplied": false,
+      "autoApplied": true,
       "updatedAt": "2026-11-24T23:36:17.962Z"
     },
     {
@@ -105,6 +120,16 @@
       "confidence": 0.57,
       "autoApplied": false,
       "updatedAt": "2026-11-24T23:36:47.673Z"
+    },
+    {
+      "key": "interactions:sphere_ai_companion",
+      "category": "interactions",
+      "target": "sphere_ai_companion",
+      "evidenceCount": 1,
+      "summary": "User is correcting my understanding; they asked about time, not cancellation.",
+      "confidence": 0.57,
+      "autoApplied": false,
+      "updatedAt": "2026-11-24T23:39:13.543Z"
     }
   ],
   "recentFeedbackLog": [
@@ -128,6 +153,13 @@
       "target": "pen",
       "sentiment": "correction",
       "summary": "user explicitly wants pen to work after re-spawning"
+    },
+    {
+      "time": "2026-11-24T23:39:13.543Z",
+      "category": "interactions",
+      "target": "sphere_ai_companion",
+      "sentiment": "correction",
+      "summary": "User is correcting my understanding; they asked about time, not cancellation."
     }
   ]
 }
