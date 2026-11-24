@@ -552,6 +552,7 @@ APP.removeEntity(ent);
 const gGeo = new THREE.IcosahedronGeometry(0.028, 1);
 const gMat = new THREE.MeshPhysicalMaterial({ color: baseCol, roughness: 0.45, sheen: 0.9, clearcoat: 0.3 });
 const inst = new THREE.InstancedMesh(gGeo, gMat, pts.length);
+inst.userData.skipMatrixShader = true;
 inst.castShadow = inst.receiveShadow = true;
 const root = new THREE.Group(); root.add(inst); APP.scene.add(root);
 const dummy = new THREE.Object3D();
@@ -559,7 +560,7 @@ const dummy = new THREE.Object3D();
 const snowEnt = APP.registerEntity({
   name: "granular snow", type: "snow", _isSnow: true, root, box, buildDur: 0.05,
   upd: (dt) => {
-    if (dt <= 0) return;
+    if (snowEnt.dissolveStart || !snowEnt.root.parent || dt <= 0) return;
     const h = Math.min(dt, 0.028);
     const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart), tk = tank ? tank.tankData : null;
 
@@ -620,7 +621,8 @@ const snowEnt = APP.registerEntity({
       inst.setMatrixAt(i, dummy.matrix);
     }
     inst.instanceMatrix.needsUpdate = true;
-  }
+  },
+  dispose: () => { pts.length = 0; inst.visible = false; }
 });
 APP.say("❄️ تحول الجسم إلى مادة مائعة — المسها أو اضغط الزناد عليها!");
 

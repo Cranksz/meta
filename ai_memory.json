@@ -28,7 +28,8 @@
     "APP.on(event, fn), APP.emit(event, data), APP.onTick(id, dur, fn, onEnd, persistent), APP.stopTick(id), APP.say(msg)"
   ],
   "learnedRules": [
-    "Always make sure new pen objects are initialized with active drawing capabilities."
+    "Always make sure new pen objects are initialized with active drawing capabilities.",
+    "Ensure the 'delete all' command permanently removes all active entities from the simulation without them reappearing."
   ],
   "userPreferences": {
     "objects": {

@@ -194,7 +194,18 @@ APP.on("pointerdown", ev => {
   }
 });
 APP.on("pointerup", () => { APP.dhand.act = false; releaseCloth(APP.dhand); if (APP.dhand.held && APP.dhand.heldType !== "pen") APP._releaseObj(APP.dhand); });
-APP.on("clear", () => APP.hands.forEach(h => { APP._releaseObj(h); releaseCloth(h); }));
+APP.on("clear", () => {
+  APP.hands.forEach(h => {
+    if (h.held) {
+      const ent = h.held;
+      if (ent._ragdollActive && APP._stopRagdoll) APP._stopRagdoll(ent);
+      ent.heldBy = null;
+      h.held = null;
+      h.heldType = null;
+    }
+    h.clothGrab = null;
+  });
+});
 
 @ability: toggle_ragdoll
 @match: ragdoll | راغدول | دمية | دميه
@@ -854,3 +865,84 @@ const machEnt = APP.registerEntity({
   },
   dispose: () => offPokeBtn()
 });
+
+@ability: delete_all
+@match: delete | clear | remove | احذف | امسح
+@code:
+const now = performance.now() / 1000;
+const snapshot = new Set(APP.entities);
+
+const purgeEntity = (ent) => {
+  if (!ent || ent._purged) return;
+  ent._purged = true;
+  if (!ent.dissolveStart) ent.dissolveStart = now;
+
+  if (ent.heldBy) {
+    const h = ent.heldBy;
+    if (h.held === ent) { h.held = null; h.heldType = null; }
+    ent.heldBy = null;
+  }
+  if (ent._ragdollActive && APP._stopRagdoll) APP._stopRagdoll(ent);
+
+  APP.stopTick("softbody_" + ent.id);
+  APP.stopTick("glass_env_" + ent.id);
+  APP.stopTick("burn_cloth_" + ent.id);
+  APP.stopTick("eject_" + ent.id);
+
+  if (APP._phys && APP._phys.remove) APP._phys.remove(ent);
+  if (typeof ent.dispose === "function") {
+    try { ent.dispose(); } catch {}
+  }
+  try { APP.removeEntity(ent); } catch {}
+
+  if (ent.root) {
+    ent.root.visible = false;
+    ent.root.traverse(o => { o.visible = false; });
+    if (ent.root.parent) ent.root.parent.remove(ent.root);
+    APP.scene.remove(ent.root);
+  }
+  const idx = APP.entities.indexOf(ent);
+  if (idx >= 0) APP.entities.splice(idx, 1);
+};
+
+APP.clear();
+
+for (const e of APP.entities) snapshot.add(e);
+
+const pendingDissolve = [];
+for (const ent of snapshot) {
+  let hasInstancedOrLines = false;
+  if (ent.root) {
+    ent.root.traverse(o => {
+      if (o.isInstancedMesh || o.isLine || o.isLineSegments || o.isPoints) hasInstancedOrLines = true;
+    });
+  }
+  const isWeatherOrFluid = ent.type === "weather" || ent.type === "snow" || ent._isSnow || !ent.matrixUniforms || hasInstancedOrLines;
+  if (isWeatherOrFluid || !APP.entities.includes(ent)) {
+    if (isWeatherOrFluid && ent.root && ent.root.parent) {
+      try {
+        const box = APP.computeBox(ent.root);
+        APP.fx.spawnBox(box, ent.type === "snow" || ent._isSnow ? "frost" : "matrix", 22);
+      } catch {}
+    }
+    purgeEntity(ent);
+  } else {
+    pendingDissolve.push(ent);
+  }
+}
+
+if (pendingDissolve.length) {
+  const sweepId = "delete_all_sweep_" + Math.floor(now * 1000);
+  APP.onTick(sweepId, 0.85, () => {
+    for (let i = pendingDissolve.length - 1; i >= 0; i--) {
+      const ent = pendingDissolve[i];
+      if (!APP.entities.includes(ent)) {
+        purgeEntity(ent);
+        pendingDissolve.splice(i, 1);
+      }
+    }
+  }, () => {
+    for (const ent of pendingDissolve) purgeEntity(ent);
+    pendingDissolve.length = 0;
+  }, true);
+}

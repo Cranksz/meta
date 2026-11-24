@@ -174,7 +174,3 @@ if (sess && sess.environmentBlendMode === "opaque" && navigator.xr) {
 }
 APP.renderer.setClearAlpha(0); APP.scene.background = null; APP.scene.fog = null;
 APP.say("👁 تم تفعيل الرؤية الواقعية (Passthrough)");
-
-@ability: delete_all
-@match: delete | clear | remove | احذف | امسح
-@do: APP.clear();

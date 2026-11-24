@@ -29,10 +29,6 @@ car.semanticTag = "vehicle";
 @match: forest | woods | اجعلني في الغابة | اجعلني في الغابه | الغابة | الغابه
 @do: await APP.spawnGLB({ file: "forest.glb", name: "forest", radial: true });
 
-@ability: delete_all
-@match: delete | clear | remove | احذف | امسح
-@do: APP.clear();
-
 @ability: enter_matrix_world
 @match: enter & matrix | ادخل الماتريكس | الماتريكس | ماتريكس
 @code:
@@ -219,7 +215,7 @@ APP.scene.add(root);
 const rainEnt = APP.registerEntity({
   name: "rain", type: "weather", root, box: new THREE.Box3(new THREE.Vector3(-7, 0, -7), new THREE.Vector3(7, 8, 7)), buildDur: 0.2,
   upd: (dt) => {
-    if (frozen) return;
+    if (rainEnt.dissolveStart || !rainEnt.root.parent || frozen) return;
     const attr = rGeo.attributes.position.array, windShift = APP.worldWind * 0.25;
     for (let i = 0; i < COUNT; i++) {
       const dr = drops[i];
@@ -246,7 +242,12 @@ const rainEnt = APP.registerEntity({
       sp.m.material.opacity = (1 - sp.t) * 0.65;
     }
   },
-  dispose: () => { if (rainSrc) try { rainSrc.stop(); } catch {} }
+  dispose: () => {
+    if (rainSrc) try { rainSrc.stop(); rainSrc.disconnect(); } catch {}
+    rainSrc = null;
+    rainLines.visible = false;
+    if (frozenMesh) frozenMesh.visible = false;
+  }
 });
 
 rainEnt._freezeRain = () => {
@@ -263,6 +264,7 @@ rainEnt._freezeRain = () => {
   });
   const count = Math.min(480, drops.length);
   frozenMesh = new THREE.InstancedMesh(dropGeo, mirrorMat, count);
+  frozenMesh.userData.skipMatrixShader = true;
   const dummy = new THREE.Object3D();
   for (let i = 0; i < count; i++) {
     const dr = drops[i];
