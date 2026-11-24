@@ -1,0 +1,72 @@
+{
+  "project": "Say It, See It (WebXR + Three.js r147)",
+  "priorityOrder": [
+    "abilities.txt",
+    "interaction.txt",
+    "physics.txt",
+    "drawing.txt",
+    "models.txt"
+  ],
+  "conventions": [
+    "Every ability uses @ability: <unique_id>, @match: <ar & en patterns>, and @code: or @do:.",
+    "Always include both English and Arabic keywords in @match.",
+    "Use APP.THREE instead of global THREE inside @ability blocks.",
+    "Set instancedMesh.userData.skipMatrixShader = true on InstancedMesh objects so applyDissolveShader never discards them.",
+    "Background systems that register APP.onTick(..., null, true) must clean up previous globals on hot-reload.",
+    "Do not duplicate @match triggers that already exist in an earlier file in priorityOrder unless updating or removing the duplicate."
+  ],
+  "appApiSummary": [
+    "APP.THREE, APP.scene, APP.camera, APP.renderer, APP.SkeletonUtils, APP.gltfLoader",
+    "APP.entities, APP.hands, APP.dhand, APP.headPos, APP.headFwd, APP.pointer, APP.ragdollMode",
+    "APP.tex: bumpNoise(rep, contrast), wood(base, dark, rep), metal(base, rep), carbon(rep), stone(base, rep), ice(rep)",
+    "APP.phys: register(b), unregister(b), collidePoint(pos, radius, vel, bounce, friction), waterHook",
+    "APP._phys: register(ent, mode, extra) [from physics.txt]",
+    "APP.spawnPos(dist, yawDeg), APP.registerEntity(opts), APP.removeEntity(ent), APP.findEntities(spec)",
+    "APP.computeBox(root), APP.applyDissolveShader(root, minY, maxY, radial), APP.updateReflection(pos)",
+    "APP.fx: spawnPoint(kind,x,y,z,scale,color), spawnBox(box,kind,count), groundPulse(x,z,maxR,color)",
+    "APP.sfx.play(\"build\"|\"burn\"|\"delete\"|\"magic\"|\"click\"|\"shatter\"|\"soft\"|\"splash\")",
+    "APP.on(event, fn), APP.emit(event, data), APP.onTick(id, dur, fn, onEnd, persistent), APP.stopTick(id), APP.say(msg)"
+  ],
+  "learnedRules": [],
+  "userPreferences": {
+    "objects": {
+      "pen": {
+        "target": "pen",
+        "likes": [],
+        "dislikes": [
+          "ink not appearing"
+        ],
+        "notes": [
+          "ink not appearing"
+        ],
+        "preferredParams": {},
+        "count": 1,
+        "lastUpdated": "2026-11-24T23:36:17.962Z"
+      }
+    },
+    "effects": {},
+    "physics": {},
+    "interactions": {}
+  },
+  "recurringPatterns": [
+    {
+      "key": "objects:pen",
+      "category": "objects",
+      "target": "pen",
+      "evidenceCount": 1,
+      "summary": "ink not appearing",
+      "confidence": 0.57,
+      "autoApplied": false,
+      "updatedAt": "2026-11-24T23:36:17.962Z"
+    }
+  ],
+  "recentFeedbackLog": [
+    {
+      "time": "2026-11-24T23:36:17.962Z",
+      "category": "objects",
+      "target": "pen",
+      "sentiment": "negative",
+      "summary": "ink not appearing"
+    }
+  ]
+}
