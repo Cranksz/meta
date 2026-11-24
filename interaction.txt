@@ -19,6 +19,7 @@ const pointToSeg = (p, a, b, out) => {
 
 APP._grabObj = (hand, ent) => {
   if (!ent || ent.dissolveStart) return;
+  if (hand.held && hand.held !== ent) APP._releaseObj(hand);
   if (ent.heldBy && ent.heldBy !== hand) APP._releaseObj(ent.heldBy);
   hand.held = ent; hand.heldType = ent.type; ent.heldBy = hand;
   ent.lockedInChamber = false;
@@ -91,7 +92,16 @@ const releaseCloth = (hand) => {
 };
 
 const tryGrab = (hand) => {
+  if (hand.held && (hand.held.dissolveStart || !hand.held.root.parent)) {
+    hand.held.heldBy = null;
+    hand.held = null;
+    hand.heldType = null;
+  }
   if (hand.held) return;
+  if (hand.pokeHit && hand.pokeHit.ent && hand.pokeHit.ent.type === "pen" && hand.pokeHit.ent.grabbable && !hand.pokeHit.ent.dissolveStart) {
+    APP._grabObj(hand, hand.pokeHit.ent);
+    return;
+  }
   const hp = hand.wp, tp = hand.tipWp, tmpC = new THREE.Vector3();
   let best = null, bestD = 0.34;
   for (const ent of APP.entities) {
@@ -104,7 +114,9 @@ const tryGrab = (hand) => {
       const box = APP.computeBox(ent.root);
       d = Math.min(box.distanceToPoint(hp), box.distanceToPoint(tp));
     }
-    if (d < bestD) { bestD = d; best = ent; }
+    const maxReach = ent.type === "pen" ? 0.55 : bestD;
+    if (d < maxReach && d < bestD) { bestD = d; best = ent; }
+    else if (ent.type === "pen" && !best && d < 0.55) { bestD = d; best = ent; }
   }
   if (best) { APP._grabObj(hand, best); return; }
 
@@ -156,12 +168,12 @@ APP.on("pinchstart", h => tryGrab(h));
 APP.on("pinchend", h => { releaseCloth(h); if (h.held && h.heldType !== "pen") APP._releaseObj(h); });
 APP.on("squeezestart", h => { if (h.held) APP._releaseObj(h); else tryGrab(h); });
 APP.on("squeezeend", h => releaseCloth(h));
-APP.on("selectstart", h => { if (!h.held && (!h.pokeHit || h.pokeHit.distance < 0.45)) tryGrab(h); });
+APP.on("selectstart", h => { if (!h.held && (!h.pokeHit || h.pokeHit.distance < 0.45 || (h.pokeHit.ent && h.pokeHit.ent.type === "pen"))) tryGrab(h); });
 APP.on("selectend", h => releaseCloth(h));
 
 APP.on("pointerdown", ev => {
   const dh = APP.dhand;
-  if (dh.heldType === "pen") { dh.act = true; ev.handled = true; return; }
+  if (dh.heldType === "pen" && dh.held && !dh.held.dissolveStart) { dh.act = true; ev.handled = true; return; }
   const tankEnt = APP.entities.find(e => e.type === "tank" && !e.dissolveStart);
   if (tankEnt && APP._splashWater) {
     const ht = ev.ray.intersectObject(tankEnt.root, true)[0];

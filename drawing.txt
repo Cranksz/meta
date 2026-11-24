@@ -12,6 +12,7 @@
 const THREE = APP.THREE;
 const drawnStrokes = [];
 const activeStrokes = new Map();
+const triggerHeld = new Set();
 let currentPen = null;
 let currentBoard = null;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -19,6 +20,8 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 // Clean up hot-reloaded instances if abilities are re-parsed live
 if (APP._palmToolbar) { APP.scene.remove(APP._palmToolbar); APP._palmToolbar = null; }
 if (APP._penTimeTick) { APP.stopTick(APP._penTimeTick); }
+if (APP._penCleanup) { APP._penCleanup.forEach(fn => { try { fn(); } catch {} }); }
+APP._penCleanup = [];
 
 const brushState = {
   style: "default", // "default" | "grass" | "metal" | "water" | "rope" | "glass" | "2d"
@@ -1009,10 +1012,17 @@ const finishGrainsStroke = (pts, style) => {
   });
 };
 
+const clearStrokePreview = (st) => {
+  if (!st) return;
+  if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); st.mesh = null; }
+  if (st.dotMesh) { APP.scene.remove(st.dotMesh); st.dotMesh.geometry.dispose(); st.dotMesh = null; }
+};
+
 const finishStroke = (h) => {
   const st = activeStrokes.get(h); activeStrokes.delete(h);
-  if (!st || st.pts.length < 4) { if (st && st.mesh) APP.scene.remove(st.mesh); return; }
-  if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); }
+  if (!st) return;
+  clearStrokePreview(st);
+  if (st.pts.length < 2) return;
 
   const style = st.style || brushState.style;
   let physMode = st.physics || brushState.physics;
@@ -1021,17 +1031,17 @@ const finishStroke = (h) => {
     APP._nextStrokeGravity = false;
   }
 
-  // Magic Pen keeps AI shape classification when using default brush + no physics override
-  if (st.isMagic && style === "default" && physMode === "none") {
+  // Magic Pen keeps AI shape classification when using default brush + no physics override (for full strokes)
+  if (st.isMagic && style === "default" && physMode === "none" && st.pts.length >= 4) {
     spawnMagicCreation(st.pts);
     return;
   }
 
-  if (physMode === "cloth") { finishClothStroke(st.pts, style); return; }
-  if (physMode === "grains") { finishGrainsStroke(st.pts, style); return; }
+  if (physMode === "cloth" && st.pts.length >= 3) { finishClothStroke(st.pts, style); return; }
+  if (physMode === "grains" && st.pts.length >= 3) { finishGrainsStroke(st.pts, style); return; }
 
   const curve = new THREE.CatmullRomCurve3(st.pts), pts = [];
-  const nS = clamp(Math.round(curve.getLength() / 0.032), 12, 48);
+  const nS = clamp(Math.round(curve.getLength() / 0.032), 6, 48);
   for (let i = 0; i <= nS; i++) pts.push(curve.getPointAt(i / nS));
 
   const com = new THREE.Vector3(); pts.forEach(p => com.add(p)); com.multiplyScalar(1 / pts.length);
@@ -1062,7 +1072,8 @@ const finishStroke = (h) => {
     com: com.clone(), q: new THREE.Quaternion(), ent: null
   };
 
-  const mxU = APP.applyDissolveShader(loopMesh, com.y - 1, com.y + 1, false);
+  const strokeBox = new THREE.Box3().setFromObject(loopMesh);
+  const mxU = APP.applyDissolveShader(loopMesh, strokeBox.min.y - 0.5, strokeBox.max.y + 0.5, false);
   mxU.uProg.value = 1;
 
   const localTmp = Array.from({ length: localPts.length }, () => new THREE.Vector3());
@@ -1070,7 +1081,7 @@ const finishStroke = (h) => {
 
   sObj.ent = APP.registerEntity({
     name: `${style !== "default" ? style : "drawing"}${isSoft ? " softbody" : (isRigid ? " rigidbody" : "")}`,
-    type: "stroke", root: loopMesh, box: new THREE.Box3().setFromObject(loopMesh),
+    type: "stroke", root: loopMesh, box: strokeBox,
     matrixUniforms: mxU, buildDur: 0.05, grabbable: !isSoft, _isSoft: isSoft, strokeObj: sObj,
     upd: (dt) => {
       if (!sObj.isDynamic || sObj.ent.dissolveStart || dt <= 0) return;
@@ -1224,7 +1235,24 @@ const syncPenNibVisual = () => {
 APP._spawnPen = (mode = "space") => {
   const isMagic = String(mode).toLowerCase() === "magic";
   APP.sfx.play(isMagic ? "magic" : "build");
-  if (currentPen && !currentPen.dissolveStart) APP.dissolve({ target: currentPen.id, duration: 0.4 });
+
+  // Cleanly detach any previously held pen and remember which hand held it so re-spawning keeps drawing active
+  let prevHolder = null;
+  for (const h of APP.hands) {
+    if (h.held && h.held.type === "pen") {
+      if (!prevHolder && !h.isDesk) prevHolder = h;
+      if (activeStrokes.has(h)) finishStroke(h);
+      if (h.held.root && h.held.root.parent === h.grip) APP.scene.attach(h.held.root);
+      h.held.heldBy = null;
+      h.held = null;
+      h.heldType = null;
+    }
+  }
+  if (currentPen && !currentPen.dissolveStart) {
+    if (!prevHolder && currentPen.heldBy) prevHolder = currentPen.heldBy;
+    APP.dissolve({ target: currentPen.id, duration: 0.4 });
+  }
+
   const root = new THREE.Group();
   const body = new THREE.MeshPhysicalMaterial({ color: isMagic ? 0x10131e : 0x1a1e24, metalness: 0.85, roughness: 0.22, clearcoat: 0.92, bumpMap: strokeBump, bumpScale: 0.0012 });
   const trim = new THREE.MeshPhysicalMaterial({ color: isMagic ? 0xffc845 : 0xd4a44a, metalness: 0.96, roughness: 0.14 });
@@ -1238,13 +1266,28 @@ APP._spawnPen = (mode = "space") => {
   root.position.set(APP.headPos.x + APP.headFwd.x * 0.55, Math.max(0.95, APP.headPos.y - 0.25), APP.headPos.z + APP.headFwd.z * 0.55);
   root.rotation.y = Math.atan2(-APP.headFwd.x, -APP.headFwd.z) + 0.6; APP.scene.add(root);
   const b = APP.computeBox(root), mxU = APP.applyDissolveShader(root, b.min.y, b.max.y, false);
-  currentPen = APP.registerEntity({
-    name: isMagic ? "magic pen" : "pen", type: "pen", isMagic, nibMat: nibM, root, box: b, matrixUniforms: mxU,
+  const penEnt = APP.registerEntity({
+    name: isMagic ? "magic pen" : "pen", type: "pen", isMagic, drawingEnabled: true, nibMat: nibM, root, box: b, matrixUniforms: mxU,
     buildDur: 0.8, grabbable: true, tipLocal: new THREE.Vector3(0, 0, -0.106), baseY: root.position.y,
-    upd: (dt, t) => { if (!currentPen.heldBy && !currentPen.dissolveStart) { root.position.y = currentPen.baseY + Math.sin(t * 2.4) * 0.025; root.rotation.y += dt * 0.7; } }
+    upd: (dt, t) => { if (!penEnt.heldBy && !penEnt.dissolveStart) { root.position.y = penEnt.baseY + Math.sin(t * 2.4) * 0.025; root.rotation.y += dt * 0.7; } },
+    dispose: () => {
+      if (penEnt.heldBy) {
+        const h = penEnt.heldBy;
+        if (activeStrokes.has(h)) finishStroke(h);
+        if (h.held === penEnt) { h.held = null; h.heldType = null; }
+        penEnt.heldBy = null;
+      }
+      if (currentPen === penEnt) currentPen = null;
+    }
   });
-  if (!APP.renderer.xr.isPresenting && APP._grabObj) APP._grabObj(APP.dhand, currentPen);
-  return currentPen;
+  currentPen = penEnt;
+
+  if (prevHolder && APP._grabObj) {
+    APP._grabObj(prevHolder, penEnt);
+  } else if (!APP.renderer.xr.isPresenting && APP._grabObj) {
+    APP._grabObj(APP.dhand, penEnt);
+  }
+  return penEnt;
 };
 
 // ------------------------------------------------------------------------------
@@ -1516,15 +1559,18 @@ const hitBoardRay = (ray, inputKey, isTap) => {
   return false;
 };
 
-APP.on("selectstart", h => {
+APP._penCleanup.push(APP.on("selectstart", h => {
+  triggerHeld.add(h);
   if (h.isDesk || h.handTrackingActive || !h.c) return;
   h.c.getWorldPosition(tbTmpW); h.c.getWorldQuaternion(tbTmpQ);
   tbTmpD.set(0, 0, -1).applyQuaternion(tbTmpQ); tbRay.set(tbTmpW, tbTmpD);
   if (hitPalmToolbarRay(tbRay)) return;
   hitBoardRay(tbRay, "ctrl_" + h.side, true);
-});
+}));
+APP._penCleanup.push(APP.on("selectend", h => triggerHeld.delete(h)));
 
-APP.on("pinchstart", h => {
+APP._penCleanup.push(APP.on("pinchstart", h => {
+  triggerHeld.add(h);
   if (h.isDesk) return;
   if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData) {
     const bd = currentBoard.boardData;
@@ -1533,17 +1579,32 @@ APP.on("pinchstart", h => {
       if (h.tipWp.distanceTo(wp) < 0.08) { fb.action(); return; }
     }
   }
-});
+}));
+APP._penCleanup.push(APP.on("pinchend", h => triggerHeld.delete(h)));
+APP._penCleanup.push(APP.on("squeezestart", h => triggerHeld.delete(h)));
+APP._penCleanup.push(APP.on("entityreleased", ev => { if (ev && ev.hand) triggerHeld.delete(ev.hand); }));
 
 let deskWritingBoard = false;
-APP.on("pointerdown", ev => {
-  if (hitPalmToolbarRay(ev.ray)) { ev.handled = true; return; }
+APP._penCleanup.push(APP.on("pointerdown", ev => {
+  if (hitPalmToolbarRay(ev.ray)) {
+    ev.handled = true;
+    APP.dhand.act = false;
+    triggerHeld.delete(APP.dhand);
+    return;
+  }
   if (hitBoardRay(ev.ray, "desk_mouse", true)) { deskWritingBoard = true; ev.handled = true; return; }
-});
-APP.on("pointerup", () => {
+  if (APP.dhand.heldType === "pen" && APP.dhand.held && !APP.dhand.held.dissolveStart) {
+    APP.dhand.act = true;
+    triggerHeld.add(APP.dhand);
+    ev.handled = true;
+  }
+}));
+APP._penCleanup.push(APP.on("pointerup", () => {
   deskWritingBoard = false;
+  APP.dhand.act = false;
+  triggerHeld.delete(APP.dhand);
   if (currentBoard && currentBoard.boardData) currentBoard.boardData.resetStroke("desk_mouse");
-});
+}));
 
 APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
   const now = performance.now() / 1000;
@@ -1619,14 +1680,20 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
 
   // 4. Pen Drawing (either flat onto 2D Board or 3D Stroke)
   for (const h of APP.hands) {
-    if (!currentPen || currentPen.dissolveStart || currentPen.heldBy !== h || !h.act) {
+    const activePen = (h.held && h.held.type === "pen" && !h.held.dissolveStart && h.held.root.parent)
+      ? h.held
+      : (currentPen && !currentPen.dissolveStart && currentPen.heldBy === h ? currentPen : null);
+    if (activePen && currentPen !== activePen) currentPen = activePen;
+
+    const triggerActive = !!(h.act || triggerHeld.has(h) || (h.isDesk && APP.pointer.down));
+    if (!activePen || !triggerActive) {
       if (activeStrokes.has(h)) finishStroke(h);
       if (currentBoard && currentBoard.boardData) currentBoard.boardData.resetStroke("pen_" + h.side);
       continue;
     }
 
-    currentPen.root.updateMatrixWorld(true);
-    const tip = currentPen.tipLocal.clone().applyMatrix4(currentPen.root.matrixWorld);
+    activePen.root.updateMatrixWorld(true);
+    const tip = activePen.tipLocal.clone().applyMatrix4(activePen.root.matrixWorld);
 
     // If holding pen near the 2D board (and no 3D physics mode active), write cleanly onto the 2D board!
     let wroteOnBoard = false;
@@ -1644,8 +1711,7 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
     }
     if (wroteOnBoard) {
       if (activeStrokes.has(h)) {
-        const s0 = activeStrokes.get(h);
-        if (s0.mesh) { APP.scene.remove(s0.mesh); s0.mesh.geometry.dispose(); }
+        clearStrokePreview(activeStrokes.get(h));
         activeStrokes.delete(h);
       }
       continue;
@@ -1666,26 +1732,32 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
 
     let st = activeStrokes.get(h);
     if (!st) {
-      const isM = !!currentPen.isMagic;
+      const isM = !!activePen.isMagic;
       const curStyle = brushState.style;
       const previewCol = BRUSH_NIB_COLORS[curStyle] || (isM ? 0x26ffd0 : 0x38d9ff);
+      const rad = isM && curStyle === "default" ? 0.009 : 0.014;
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: previewCol, emissive: previewCol, emissiveIntensity: 0.45,
+        metalness: curStyle === "metal" ? 0.9 : 0.35, roughness: 0.22,
+        transparent: curStyle === "water" || curStyle === "glass",
+        opacity: curStyle === "water" ? 0.72 : (curStyle === "glass" ? 0.48 : 1.0)
+      });
+      const dotMesh = new THREE.Mesh(new THREE.SphereGeometry(rad, 10, 8), mat);
+      dotMesh.position.copy(drawTip);
+      APP.scene.add(dotMesh);
       st = {
-        pts: [drawTip], mesh: null,
-        radius: isM && curStyle === "default" ? 0.009 : 0.014,
+        pts: [drawTip], mesh: null, dotMesh,
+        radius: rad,
         isMagic: isM, style: curStyle, physics: brushState.physics,
-        mat: new THREE.MeshPhysicalMaterial({
-          color: previewCol, emissive: previewCol, emissiveIntensity: 0.45,
-          metalness: curStyle === "metal" ? 0.9 : 0.35, roughness: 0.22,
-          transparent: curStyle === "water" || curStyle === "glass",
-          opacity: curStyle === "water" ? 0.72 : (curStyle === "glass" ? 0.48 : 1.0)
-        })
+        mat
       };
       activeStrokes.set(h, st);
       continue;
     }
 
-    if (st.pts[st.pts.length - 1].distanceTo(drawTip) >= 0.015) {
+    if (st.pts[st.pts.length - 1].distanceTo(drawTip) >= 0.008) {
       st.pts.push(drawTip);
+      if (st.dotMesh) { APP.scene.remove(st.dotMesh); st.dotMesh.geometry.dispose(); st.dotMesh = null; }
       if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); }
       st.mesh = buildTube(st.pts, st.radius, st.mat);
       if (st.mesh) APP.scene.add(st.mesh);
@@ -1693,10 +1765,12 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
   }
 }, null, true);
 
-APP.on("clear", () => {
-  activeStrokes.forEach(s => { if (s.mesh) APP.scene.remove(s.mesh); });
+APP._penCleanup.push(APP.on("clear", () => {
+  activeStrokes.forEach(s => clearStrokePreview(s));
   activeStrokes.clear();
-});
+  triggerHeld.clear();
+  currentPen = null;
+}));
 
 @ability: pen_space
 @match: give & pen | pen | اعطني قلم | قلم | ارسم
