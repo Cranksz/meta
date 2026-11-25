@@ -1,0 +1,9 @@
+@ability: make_cat_grabbable
+@code:
+const THREE = APP.THREE;
+const cat = APP.scene.getObjectByName("cat_model");
+if (cat) {
+  cat.userData.grabbable = true;
+  cat.userData.throwable = true;
+  console.log("Cat is now grabbable!");
+}
