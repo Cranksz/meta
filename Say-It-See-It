@@ -3486,7 +3486,6 @@ if (mdl.startsWith('puter:') || /^(groq:|openrouter:|pollinations:)/i.test(mdl))
   return { replyText, resolvedText };
 }
 
-// Gemini / Gemma 4 Turn
 const parts = [{ text: contextLine }];
 if (audioWavBlob) parts.push({ inlineData: { mimeType: 'audio/wav', data: await blobToB64(audioWavBlob) } });
 if (b64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
@@ -4452,9 +4451,8 @@ if (didSomething) {
 
 } catch (e) { console.warn('Cloud creative fallback notice:', e.message); }
 
-// Zero-Failure Safety Net: Run matching repo ability or build local 3D creation
-(NEVER fails!) const matched = findMatchingAbilities(rawText, 1); if
-(matched.length) { await runAbility(matched[0].ab, rawText); return; } await
+const matched = findMatchingAbilities(rawText, 1); if (matched.length) { await
+runAbility(matched[0].ab, rawText); return; } await
 localProceduralFallback(rawText); say('✨ تم البناء محلياً — اربط حساب Puter
 مجاناً من "🧠 الذكاء" للحصول على ذكاء سحابي كامل'); };
 
@@ -4700,6 +4698,9 @@ of matrixCurtains) c.tex.offset.y = (c.tex.offset.y + dt0 * c.speed) % 1; if
 Math.cos(a) * r, 3.8 + Math.random() * 1.8, headPos.z + Math.sin(a) *
 r, 1.15, 0x00ff77); } } renderer.render(scene, camera);
 liveCompanion.captureVisionFrameIfDue(activeCam); });
+
+window.__initialPageHtml = '\n' + document.documentElement.outerHTML;
+window.__currentEditableHtml = window.__initialPageHtml;
 
 loadFilesCache(); parseAbilitiesTxt(getMergedAbilitiesText()); if
 (('txtUrl').value) fetchAllTxtFromUrl(('txtUrl').value); if
