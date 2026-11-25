@@ -75,8 +75,8 @@
           "ink not appearing"
         ],
         "preferredParams": {},
-        "count": 2,
-        "lastUpdated": "2026-11-24T23:59:30.024Z"
+        "count": 3,
+        "lastUpdated": "2026-11-25T00:02:49.282Z"
       },
       "sphere_ai_companion": {
         "target": "sphere_ai_companion",
@@ -118,11 +118,11 @@
       "key": "interactions:pen",
       "category": "interactions",
       "target": "pen",
-      "evidenceCount": 2,
+      "evidenceCount": 3,
       "summary": "ink not appearing",
-      "confidence": 0.79,
+      "confidence": 1,
       "autoApplied": false,
-      "updatedAt": "2026-11-24T23:59:30.024Z"
+      "updatedAt": "2026-11-25T00:02:49.282Z"
     },
     {
       "key": "interactions:sphere_ai_companion",
@@ -166,6 +166,13 @@
     },
     {
       "time": "2026-11-24T23:59:30.024Z",
+      "category": "interactions",
+      "target": "pen",
+      "sentiment": "negative",
+      "summary": "ink not appearing"
+    },
+    {
+      "time": "2026-11-25T00:02:49.282Z",
       "category": "interactions",
       "target": "pen",
       "sentiment": "negative",
