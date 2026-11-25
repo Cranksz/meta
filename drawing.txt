@@ -10,6 +10,7 @@
 @autorun
 @code:
 const THREE = APP.THREE;
+console.log("Pen & Chains module loaded!");
 const drawnStrokes = [];
 const activeStrokes = new Map();
 const triggerHeld = new Set();
