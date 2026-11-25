@@ -19,7 +19,8 @@
     "Always make sure new pen objects are initialized with active drawing capabilities.",
     "Ensure the 'delete all' command permanently removes all active entities from the simulation without them reappearing.",
     "Always ensure new pen objects are initialized with active drawing capabilities.",
-    "Always comment all text outside @ability blocks in .txt files with # to prevent parser errors."
+    "Always comment all text outside @ability blocks in .txt files with # to prevent parser errors.",
+    "Never make 3D models out of separated shapes linked together; always build one single solid block model."
   ],
   "userPreferences": {
     "objects": {

@@ -476,7 +476,8 @@ const mkPetalTex = () => {
 const classifyMagicStroke = (pts) => {
   const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
   if (safePts.length < 2) return "fish";
-  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(APP.camera.quaternion).setY(0).normalize();
+  const camQ = APP.camera && APP.camera.quaternion ? APP.camera.quaternion : new THREE.Quaternion();
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camQ).setY(0).normalize();
   if (right.lengthSq() < 0.01) right.set(1, 0, 0);
   const up = new THREE.Vector3(0, 1, 0);
   const proj = safePts.map(p => ({ x: p.dot(right), y: p.dot(up) }));

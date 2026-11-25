@@ -12,8 +12,9 @@
 # - Use THREE.MeshPhysicalMaterial with envMap: APP.reflectionCube, envMapIntensity, calibrated roughness / metalness.
 #
 # 2. SMOOTH, NATURAL EDGES & SEAMLESS BLENDING (NO TOY LOOK):
-# - NEVER make 3D models out of raw separated spheres, boxes, and cylinders like a kids toy. Make models realistic with parts blended together smoothly and realistically. No cartoony look, no empty spaces between parts.
-# - Use THREE.ExtrudeGeometry with bevelEnabled: true, smooth curved profiles, rounded cylinders/spheres (24-48 segments), and call geom.computeVertexNormals().
+# - NEVER make 3D models out of raw separated spheres, boxes, and cylinders like a kids toy.
+# - NEVER make 3D models out of shapes linked together. ALWAYS CREATE ONE SINGLE SOLID BLOCK MODEL (unified ExtrudeGeometry, LatheGeometry, or merged BufferGeometry) so the model is truly one solid block with zero empty spaces between parts.
+# - Use smooth curved profiles, rounded cylinders/spheres (24-48 segments), and call geom.computeVertexNormals().
 #
 # 3. REALISTIC DESTRUCTION & SHATTERING (RANDOM SHAPES, SIZES & DUST):
 # - When breaking something or shattering an object, DO NOT split it into parts that have the same shapes and same size.

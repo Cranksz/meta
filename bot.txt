@@ -110,7 +110,7 @@ bot.setOutputRouter((audioCtx, analyserNode) => {
 });
 
 function updateSpatialAudioPose(botPos, headPos, headFwd) {
-  if (!spatialAudioCtx || !spatialPanner) return;
+  if (!spatialAudioCtx || !spatialPanner || !headPos || !headFwd || !botPos) return;
   try {
     const l = spatialAudioCtx.listener;
     if (l.positionX) {
