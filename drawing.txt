@@ -1860,11 +1860,18 @@ APP._penCleanup.push(APP.on("clear", () => {
 @ability: next_drawing_gravity
 @match: gravity & drawing | gravity & next | جاذبية & رسم | جاذبيه & رسم | اعطي & جاذبيه
 @code:
-APP._keepStrokeGravity = true;
-APP._nextStrokeGravity = true;
-APP.worldG = -9.8;
-if (APP._brushState) APP._brushState.physics = "rigidbody";
-APP.say("⚡ الجاذبية مفعلة للرسومات القادمة حتى تقول انزع الجاذبية");
+if (APP._brushState && APP._brushState.physics === 'rigidbody') {
+  APP._brushState.physics = 'none';
+  APP._keepStrokeGravity = false;
+  APP._nextStrokeGravity = false;
+  APP.say("تم إيقاف الجاذبية للرسومات");
+} else {
+  if (APP._brushState) APP._brushState.physics = 'rigidbody';
+  APP._keepStrokeGravity = true;
+  APP._nextStrokeGravity = true;
+  APP.worldG = -9.8;
+  APP.say("تم تفعيل الجاذبية للرسومات");
+}
 
 @ability: spawn_butterfly
 @match: create & butterfly | butterfly | اصنع فراشة | اصنع فراشه | فراشة | فراشه
