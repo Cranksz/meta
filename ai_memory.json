@@ -64,14 +64,16 @@
         "target": "brush_toolbar",
         "likes": [],
         "dislikes": [
-          "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue."
+          "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue.",
+          "The user is pointing at the object and wants the color changed based on their pointer context."
         ],
         "notes": [
-          "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue."
+          "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue.",
+          "The user is pointing at the object and wants the color changed based on their pointer context."
         ],
         "preferredParams": {},
-        "count": 1,
-        "lastUpdated": "2026-11-25T00:11:08.735Z"
+        "count": 2,
+        "lastUpdated": "2026-11-25T00:11:35.724Z"
       }
     },
     "effects": {},
@@ -152,11 +154,11 @@
       "key": "objects:brush_toolbar",
       "category": "objects",
       "target": "brush_toolbar",
-      "evidenceCount": 1,
-      "summary": "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue.",
-      "confidence": 0.57,
+      "evidenceCount": 2,
+      "summary": "The user is pointing at the object and wants the color changed based on their pointer context.",
+      "confidence": 0.79,
       "autoApplied": false,
-      "updatedAt": "2026-11-25T00:11:08.735Z"
+      "updatedAt": "2026-11-25T00:11:35.724Z"
     }
   ],
   "recentFeedbackLog": [
@@ -208,6 +210,13 @@
       "target": "brush_toolbar",
       "sentiment": "correction",
       "summary": "User is correcting my understanding; they asked about time, not cancellation. They also clarified that the toolbar is not blue."
+    },
+    {
+      "time": "2026-11-25T00:11:35.724Z",
+      "category": "objects",
+      "target": "brush_toolbar",
+      "sentiment": "correction",
+      "summary": "The user is pointing at the object and wants the color changed based on their pointer context."
     }
   ]
 }
