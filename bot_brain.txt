@@ -1,0 +1,665 @@
+@ability: bot_brain_module
+@autorun
+@code:
+const { $, THREE, V3, NOW, clamp, say, normalizeText, scene, camera, renderer, headPos, headFwd, hands, pointer, entities, importedImages, importedGLBs, findEntities, computeBox, createProcedural, attachEntityScript, applyTexture, modify, toolbar, loadedTxtFiles, getAbilityFileIndex, parseAbilitiesTxt, getMergedAbilitiesText, saveFilesCache, runAbility, sfx, stepHooks, pokeHooks, ai, github } = APP;
+const aiState = ai.state;
+
+if (APP._botRootGroup) {
+  scene.remove(APP._botRootGroup);
+  APP._botRootGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+}
+
+function uint8ToB64(u8) { let bin = ''; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(bin); }
+async function blobToB64(blob) { return uint8ToB64(new Uint8Array(await blob.arrayBuffer())); }
+function b64Pcm16ToFloat32(b64) {
+  const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  const view = new DataView(bytes.buffer), samples = Math.floor(len / 2), f32 = new Float32Array(samples);
+  for (let i = 0; i < samples; i++) f32[i] = view.getInt16(i * 2, true) / 32768;
+  return f32;
+}
+function downsampleTo16kInt16(float32, inRate) {
+  if (inRate === 16000) { const out = new Int16Array(float32.length); for (let i = 0; i < float32.length; i++) { const s = clamp(float32[i], -1, 1); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; } return out; }
+  const ratio = inRate / 16000, newLen = Math.max(1, Math.floor(float32.length / ratio)), out = new Int16Array(newLen);
+  for (let i = 0; i < newLen; i++) { const pos = i * ratio, idx = Math.floor(pos), frac = pos - idx, a = float32[idx] || 0, b = float32[Math.min(float32.length - 1, idx + 1)] || a, s = clamp(a + (b - a) * frac, -1, 1); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+  return out;
+}
+
+const COMPANION_STATES = {
+  standby:       { color: 0x336655, ring: 0x224433, tag: '🤖 في وضع الاستعداد' },
+  connecting:    { color: 0xffaa22, ring: 0xffcc44, tag: '⚡ جاري الاتصال...' },
+  watching:      { color: 0x00ffaa, ring: 0x00e5ff, tag: '👁 أراقب وأستمع...' },
+  user_speaking: { color: 0x00e5ff, ring: 0x55ffff, tag: '🎙 أسمعك الآن...' },
+  ai_speaking:   { color: 0x88ff44, ring: 0x00ff99, tag: '🗣 أتحدث...' },
+  learning:      { color: 0xffc83d, ring: 0xffea70, tag: '🧠 تعلمت تفضيلاً!' },
+  coding:        { color: 0xaa66ff, ring: 0x00e5ff, tag: '🛠 جاري تعديل الكود...' },
+  synced:        { color: 0x44ffcc, ring: 0x00ffaa, tag: '💾 تم التحديث على GitHub!' },
+  error:         { color: 0xff4455, ring: 0xff7788, tag: '⚠️ أضف مفتاح API في ⚙️' }
+};
+
+function createMinimalCompanionFallback() {
+  const group = new THREE.Group();
+  const coreMat = new THREE.MeshStandardMaterial({ color: 0x00ffaa, emissive: 0x00ffaa, emissiveIntensity: 1.8, roughness: 0.2, metalness: 0.3 });
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.11, 24, 18), coreMat);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.15, 0.004, 10, 40), new THREE.MeshBasicMaterial({ color: 0x00e5ff }));
+  ring.rotation.x = 0.6;
+  const hitProxy = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), new THREE.MeshBasicMaterial({ visible: false }));
+  group.add(orb, ring, hitProxy);
+  return { group, orb, ring, coreMat, hitProxy };
+}
+
+class LiveCompanionEngine {
+  constructor() {
+    this.enabled = false; this.connected = false; this.connecting = false; this.multimodalTurnMode = false; this.muted = false; this.ws = null;
+    this.modelName = localStorage.getItem('ai_live_model') || 'gemini-4-hydrogen';
+    if ($('liveBotModel') && ![...$('liveBotModel').options].some(o => o.value === this.modelName)) this.modelName = 'gemini-4-hydrogen';
+    this.voiceName = localStorage.getItem('ai_live_voice') || 'Kore';
+    this.resumptionHandle = null;
+
+    this.state = 'standby'; this.mood = 'curious'; this.stateFlashUntil = 0; this.birthTime = 0; this.dissolveTime = null;
+    this.vel = new V3(); this.pos = new V3(0.38, 1.52, -1.2); this.anchorPos = this.pos.clone();
+    this.recoilVel = new V3(); this.inspectUntil = 0; this.inspectPoint = new V3(); this.shutterPulse = 0;
+    this.navMode = 'smart'; this.outOfViewTime = 0; this.autoExploreTimer = 0; this.autoExploreGoal = new V3();
+    this.orbitTarget = null; this.flightTarget = null;
+
+    this.rootGroup = new THREE.Group(); this.rootGroup.visible = false; this.rootGroup.position.copy(this.pos); scene.add(this.rootGroup);
+    APP._botRootGroup = this.rootGroup;
+    this.fallbackRig = createMinimalCompanionFallback(); this.rootGroup.add(this.fallbackRig.group);
+    this.controller = null; this.dynamicTools = new Map(); this.customOutputRouter = null;
+    this._lastToolsSig = ''; this._toolResyncTimer = null;
+
+    this.inCtx = null; this.inStream = null; this.inSource = null; this.inWorklet = null; this.inProc = null;
+    this.inPcmAccum = []; this.inPcmLen = 0; this.inRms = 0;
+    this.vadNoise = 0.004; this.vadCalibUntil = 0;
+    this.turnSpeechChunks = []; this.turnVadSpeaking = false; this.turnVadStart = 0; this.turnVadLastLoud = 0; this.turnPreRoll = []; this.turnSpeechRec = null;
+
+    this.outCtx = null; this.outGain = null; this.outAnalyser = null; this.outTimeData = null;
+    this.outSources = new Set(); this.nextPlayAt = 0; this.outRms = 0; this.aiSpeakingUntil = 0;
+
+    this.visionCanvas = document.createElement('canvas'); this.visionCanvas.width = 512; this.visionCanvas.height = 288;
+    this.visionCtx = this.visionCanvas.getContext('2d'); this.latestVisionB64 = '';
+    this.xrRT = null; this.xrPixelBuf = null; this.xrEyeCam = new THREE.PerspectiveCamera(72, 512 / 288, 0.05, 120);
+    this.lastFrameAt = 0; this.urgentFrameAt = 0; this.frameIntervalMs = 1400;
+
+    this.telemetryBuffer = []; this.lastTelemetryPushAt = 0; this.pendingTextQueue = []; this.turnHistory = []; this.turnBusy = false;
+    this.inputTranscriptBuf = ''; this.outputTranscriptBuf = '';
+    this.memory = this.loadLocalMemory(); this.memoryDirty = false; this.syncTimer = null;
+    this.refreshUI();
+  }
+
+  setController(ctrl) {
+    this.clearController(); this.controller = ctrl || null;
+    if (this.controller) {
+      this.fallbackRig.group.visible = false;
+      try { this.controller.mount?.(this.rootGroup, this); } catch (e) { console.warn('bot mount error', e); }
+      try { this.controller.onStateChange?.(this.state, this.mood, ''); } catch {}
+    }
+  }
+  clearController() {
+    try { this.controller?.unmount?.(this.rootGroup, this); } catch {}
+    this.controller = null; this.customOutputRouter = null; this.reconnectOutputGraph(); this.fallbackRig.group.visible = true;
+  }
+  registerTool(declaration, handlerFn) {
+    if (!declaration?.name || typeof handlerFn !== 'function') return;
+    this.dynamicTools.set(declaration.name, { declaration, handler: handlerFn });
+    const sig = [...this.dynamicTools.keys()].sort().join(',');
+    if (this.enabled && this.connected && !this.multimodalTurnMode && sig !== this._lastToolsSig) {
+      this._lastToolsSig = sig;
+      clearTimeout(this._toolResyncTimer);
+      this._toolResyncTimer = setTimeout(() => {
+        if (this.enabled && this.connected && !this.multimodalTurnMode && !this.connecting) this.startLiveSession().catch(() => {});
+      }, 450);
+    }
+  }
+  clearBotExtensions() { this.dynamicTools.clear(); this.clearController(); }
+  setOutputRouter(connectFn) { this.customOutputRouter = typeof connectFn === 'function' ? connectFn : null; this.reconnectOutputGraph(); }
+  reconnectOutputGraph() {
+    if (!this.outCtx || !this.outGain || !this.outAnalyser) return;
+    try { this.outGain.disconnect(); } catch {} try { this.outAnalyser.disconnect(); } catch {}
+    this.outGain.connect(this.outAnalyser);
+    if (this.customOutputRouter) {
+      try { const tail = this.customOutputRouter(this.outCtx, this.outAnalyser); if (tail?.connect) { tail.connect(this.outCtx.destination); return; } } catch {}
+    }
+    this.outAnalyser.connect(this.outCtx.destination);
+  }
+  getGeminiKey() { return aiState.geminiKey; }
+  getOpenAiKey() { return aiState.openAiKey; }
+  getClaudeKey() { return aiState.claudeKey; }
+  getGroqKey() { return aiState.groqKey || ($('freeSttKey')?.value || '').trim(); }
+  getOpenRouterKey() { return ''; }
+
+  setMood(moodName, subText = '') { this.mood = String(moodName || 'curious'); try { this.controller?.onStateChange?.(this.state, this.mood, subText); } catch {} }
+  triggerBotAction(actionName, payload) { return this.controller?.onAction ? this.controller.onAction(actionName, payload) : null; }
+  flyTo(pos, speed = 7.5) { this.flightTarget = { pos: pos.clone(), speed }; }
+  clearFlight() { this.flightTarget = null; }
+  setNavMode(mode, targetPos = null) { this.navMode = mode || 'smart'; if (targetPos) { this.anchorPos.copy(targetPos); this.orbitTarget = targetPos.clone(); } if (mode === 'stay') this.anchorPos.copy(this.pos); }
+
+  loadLocalMemory() { try { const r = localStorage.getItem('ai_live_memory_v1'); if (r) return github.mergeMemoryObjects(github.DEFAULT_AI_MEMORY, JSON.parse(r)); } catch {} return structuredClone(github.DEFAULT_AI_MEMORY); }
+  saveLocalMemory() { try { localStorage.setItem('ai_live_memory_v1', JSON.stringify(this.memory)); } catch {} this.refreshMemoryCounter(); }
+  setMemory(mem) { this.memory = github.mergeMemoryObjects(github.DEFAULT_AI_MEMORY, mem); this.saveLocalMemory(); toolbar?.renderAll?.(); }
+  refreshMemoryCounter() { const c = (this.memory.learnedRules?.length || 0) + Object.keys(this.memory.userPreferences?.objects || {}).length + (this.memory.toolbar?.customButtons?.length || 0); if ($('liveMemCount')) $('liveMemCount').textContent = `${c} تفضيلات/أزرار`; }
+  async pullMemoryFromGitHub() { try { if (!aiState.githubToken) return; const { branch } = github.getRepoTarget(); const f = await github.ghFetchDirect(`/contents/ai_memory.json?ref=${encodeURIComponent(branch)}&t=${Date.now()}`); if (f?.content) this.setMemory(ai.parseJsonSafe(atob(f.content.replace(/\s+/g, '')))); } catch {} }
+  scheduleGitHubMemorySync(delayMs = 6000) { this.memoryDirty = true; clearTimeout(this.syncTimer); if (aiState.githubToken) this.syncTimer = setTimeout(() => this.flushMemoryToGitHub(), delayMs); }
+  async flushMemoryToGitHub() {
+    clearTimeout(this.syncTimer); if (!this.memoryDirty || !aiState.githubToken) return; this.memoryDirty = false;
+    try {
+      const snap = await github.getGitHubSnapshot(); let merged = structuredClone(this.memory);
+      if (snap['ai_memory.json']) { try { merged = github.mergeMemoryObjects(ai.parseJsonSafe(snap['ai_memory.json'].content), this.memory); } catch {} }
+      this.memory = merged; this.saveLocalMemory();
+      const res = await github.commitDirectToGitHub([{ path: 'ai_memory.json', content: JSON.stringify(merged, null, 2) + '\n' }], 'AI Companion: sync memory');
+      this.flashState('synced', '💾 تم حفظ الذاكرة في GitHub', '', 2.5); await github.refreshGitHubCommits(); return res;
+    } catch { this.memoryDirty = true; }
+  }
+
+  setState(st, subText = '') {
+    this.state = st; const info = COMPANION_STATES[st] || COMPANION_STATES.watching;
+    if (this.fallbackRig?.coreMat) { this.fallbackRig.coreMat.color.setHex(info.color); this.fallbackRig.coreMat.emissive.setHex(info.color); this.fallbackRig.ring.material.color.setHex(info.ring); }
+    try { this.controller?.onStateChange?.(st, this.mood, subText || info.tag); } catch {}
+    this.refreshUI();
+  }
+  flashState(st, title, sub = '', sec = 2.6) { this.stateFlashUntil = NOW() + sec; this.setState(st, title ? `${title} ${sub}`.trim() : sub); }
+  refreshUI() {
+    this.refreshMemoryCounter();
+    const sw = $('liveBotSwitch'), wrap = $('liveBotSwitchWrap'), lbl = $('liveBotSwitchLbl'), badge = $('liveBotStateBadge');
+    if (sw) sw.checked = this.enabled;
+    if (wrap) wrap.classList.toggle('on', this.enabled);
+    if (lbl) lbl.textContent = this.enabled ? (this.connected ? '🤖 الكرة: ON' : '🤖 الكرة: ⏳') : '🤖 الكرة: OFF';
+    if (badge) { badge.className = 'ai-badge' + (this.connected ? ' live-on' : ''); badge.textContent = !this.enabled ? '🤖 متوقف' : (this.connected ? `🟢 ${this.modelName}` : '🟡 جاري الاتصال...'); }
+    if ($('liveMuteBtn')) $('liveMuteBtn').textContent = this.muted ? '🔇 مكتوم' : '🔊 صوتها';
+    APP.rebuildToolbar?.();
+  }
+  isWebSocketLiveModel(mdl) { return /live|native-audio/i.test(String(mdl || '')); }
+
+  async setEnabled(on) {
+    on = Boolean(on); if (on === this.enabled) return;
+    ai.saveCreds();
+    if (on) {
+      if (APP.voice?.micOn) APP.voice.stopMicAll();
+      try { await this.ensureAudioOutput(); } catch {}
+      try { window.speechSynthesis?.getVoices?.(); } catch {}
+      this.enabled = true; this.dissolveTime = null; this.birthTime = NOW(); this.rootGroup.visible = true;
+      const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+      const sideOff = renderer.xr.isPresenting ? 0.55 : Math.min(0.5, Math.max(0.2, camera.aspect * 0.34));
+      this.pos.copy(headPos).addScaledVector(headFwd, 1.25).addScaledVector(right, sideOff).add(new V3(0, -0.06, 0));
+      this.anchorPos.copy(this.pos); this.rootGroup.position.copy(this.pos); sfx.play('magic');
+      if (window.isSecureContext) { try { await this.startAudioInput(); } catch (micErr) { ai.appendLog('⚠️ الميكروفون: ' + (micErr.message || micErr), 'err'); } }
+      this.pullMemoryFromGitHub().catch(() => {});
+      try { await this.startLiveSession(); } catch (err) { this.setState('error', err.message || 'خطأ'); ai.appendLog('❌ ' + (err.message || err), 'err'); say('🤖 ' + (err.message || err)); }
+    } else {
+      this.enabled = false; this.connected = false; this.connecting = false; this.multimodalTurnMode = false;
+      this.dissolveTime = NOW(); this.setState('standby', 'تم الإيقاف');
+      this.stopTurnSpeechLoop(); this.stopAudioInput(); this.stopAudioOutput(); this.closeWebSocket();
+      try { window.speechSynthesis?.cancel(); } catch {}
+      this.flushMemoryToGitHub(); this.refreshUI(); sfx.play('delete');
+    }
+  }
+
+  async startLiveSession() {
+    if (!this.enabled) return;
+    ai.saveCreds(); this.closeWebSocket(); this.stopTurnSpeechLoop(); this.connected = false; this.connecting = true;
+    const mdl = this.modelName;
+    if (this.isWebSocketLiveModel(mdl) && aiState.geminiKey.startsWith('AIza')) { await this.connectExactWebSocket(mdl); return; }
+    const activeChain = await ai.getSmartProviderChain(mdl);
+    const chosen = activeChain[0];
+    if (chosen !== this.modelName) {
+      this.modelName = chosen;
+      if ($('liveBotModel') && [...$('liveBotModel').options].some(o => o.value === chosen)) $('liveBotModel').value = chosen;
+    }
+    this.activateMultimodalTurnMode(this.modelName);
+  }
+
+  activateMultimodalTurnMode(mdl) {
+    this.multimodalTurnMode = true; this.connected = true; this.connecting = false;
+    this.setState('watching', mdl); this.urgentFrameAt = performance.now() + 200; this.startTurnSpeechLoop();
+    ai.appendLog(`🟢 الكرة متصلة بـ (${mdl})! تكلم أو اكتب طلبك الآن.`, 'bot'); say(`🤖 الكرة متصلة بـ ${mdl}`);
+    while (this.pendingTextQueue.length) this.runMultimodalTurn(this.pendingTextQueue.shift());
+  }
+
+  startTurnSpeechLoop() {
+    this.stopTurnSpeechLoop();
+    const canUseWebAudioVoice = (this.getGroqKey().startsWith('gsk_') || aiState.geminiKey.startsWith('AIza'));
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!canUseWebAudioVoice && SR) {
+      try {
+        const rec = new SR(), lc = $('sttLang')?.value; rec.lang = lc === 'en' ? 'en-US' : 'ar-DZ'; rec.continuous = true; rec.interimResults = false;
+        rec.onresult = e => { if (!this.enabled || !this.multimodalTurnMode) return; const res = e.results[e.results.length - 1], txt = res?.[0]?.transcript?.trim() || ''; if (res.isFinal && txt) this.runMultimodalTurn(txt); };
+        rec.onend = () => { if (this.enabled && this.multimodalTurnMode && this.turnSpeechRec === rec) setTimeout(() => { try { rec.start(); } catch {} }, 350); };
+        rec.start(); this.turnSpeechRec = rec;
+      } catch {}
+    }
+  }
+  stopTurnSpeechLoop() { if (this.turnSpeechRec) { try { this.turnSpeechRec.onend = null; this.turnSpeechRec.stop(); } catch {} this.turnSpeechRec = null; } this.turnVadSpeaking = false; this.turnSpeechChunks = []; }
+
+  async speakExpressive(text, mood = this.mood) {
+    if (this.muted || !text) return;
+    if (this.controller?.onSpeak) { try { if (await this.controller.onSpeak(text, mood)) return; } catch {} }
+    if ('speechSynthesis' in window) {
+      try {
+        const speakNow = () => {
+          const u = new SpeechSynthesisUtterance(text); u.lang = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
+          u.pitch = (mood === 'excited' || mood === 'happy') ? 1.14 : 1.04; u.rate = 1.02;
+          u.onstart = () => { this.aiSpeakingUntil = NOW() + 5.5; this.setState('ai_speaking'); };
+          u.onend = () => { this.aiSpeakingUntil = 0; if (this.connected && NOW() > this.stateFlashUntil) this.setState('watching'); };
+          window.speechSynthesis.speak(u);
+        };
+        if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); setTimeout(speakNow, 30); } else speakNow();
+      } catch {}
+    }
+  }
+
+  async sendTextFeedback(text) {
+    const clean = String(text || '').trim(); if (!clean) return;
+    if (!this.enabled) { this.pendingTextQueue.push(clean); await this.setEnabled(true); return; }
+    if (!this.connected) { this.pendingTextQueue.push(clean); ai.appendLog('⏳ بانتظار اتصال الكرة...', 'bot'); return; }
+    if (this.multimodalTurnMode) { await this.runMultimodalTurn(clean); return; }
+    ai.appendLog('💬 للكرة: ' + clean, 'user');
+    this.sendWs({ clientContent: { turns: [{ role: 'user', parts: [{ text: clean }] }], turnComplete: true } });
+  }
+
+  async resolveVoiceInputText(audioWavBlob) {
+    if (!audioWavBlob) return '';
+    if (this.getGroqKey().startsWith('gsk_')) {
+      const fd = new FormData(); fd.append('file', audioWavBlob, 'live.wav'); fd.append('model', 'whisper-large-v3-turbo'); fd.append('response_format', 'json');
+      const lc = $('sttLang')?.value; if (lc === 'ar' || lc === 'en') fd.append('language', lc);
+      const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + this.getGroqKey() }, body: fd });
+      const d = await r.json().catch(() => ({})); return (d.text || '').replace(/\[.*?\]|\(.*?\)/g, '').trim();
+    }
+    if (aiState.geminiKey.startsWith('AIza')) {
+      const b64 = await blobToB64(audioWavBlob), list = await ai.discoverGeminiModels();
+      for (const gm of list.slice(0, 3)) {
+        try {
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${gm}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey }, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Transcribe verbatim in original language.' }, { inlineData: { mimeType: 'audio/wav', data: b64 } }] }] }) });
+          if (res.ok) { const d = await res.json(); const txt = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim(); if (txt) return txt; }
+        } catch {}
+      }
+    }
+    return '';
+  }
+
+  async runSingleModelTurn(mdl, userText, audioWavBlob, sysPrompt, allDecls, b64) {
+    const contextLine = `[SIM_SNAPSHOT] ${JSON.stringify(this.execInspectState())}\n\nUSER: ${userText || '(Listen to the attached voice message and execute tools/reply.)'}`;
+    let replyText = '', resolvedText = userText;
+
+    if (mdl.startsWith('claude:')) {
+      if (!resolvedText && audioWavBlob) { resolvedText = await this.resolveVoiceInputText(audioWavBlob); if (!resolvedText) return { replyText: '', resolvedText: '' }; ai.appendLog('🎙 سمعتك: ' + resolvedText, 'user'); }
+      const cModel = mdl.slice(7), tools = allDecls.map(d => ({ name: d.name, description: d.description, input_schema: ai.lowercaseSchemaTypes(d.parameters || { type: 'object', properties: {} }) }));
+      const finalLine = `[SIM_SNAPSHOT] ${JSON.stringify(this.execInspectState())}\n\nUSER: ${resolvedText}`;
+      const uContent = b64 ? [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } }, { type: 'text', text: finalLine }] : finalLine;
+      const messages = [...this.turnHistory.slice(-6), { role: 'user', content: uContent }];
+      for (let round = 0; round < 5; round++) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': aiState.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: cModel, max_tokens: 4096, system: sysPrompt, messages, tools }) });
+        const data = await res.json().catch(() => ({})); if (!res.ok) { const err = new Error(`Claude (${cModel}) ${res.status}: ${data.error?.message || res.statusText}`); err.status = res.status; throw err; }
+        const blocks = data.content || []; messages.push({ role: 'assistant', content: blocks });
+        replyText += blocks.filter(b => b.type === 'text').map(b => b.text).join(' ');
+        const uses = blocks.filter(b => b.type === 'tool_use'); if (!uses.length) break;
+        const toolResults = []; for (const tu of uses) toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(await this.executeToolCall(tu.name, tu.input || {})) });
+        messages.push({ role: 'user', content: toolResults });
+      }
+      return { replyText, resolvedText };
+    }
+
+    if (mdl.startsWith('openai:') || mdl.startsWith('groq:')) {
+      if (!resolvedText && audioWavBlob) { resolvedText = await this.resolveVoiceInputText(audioWavBlob); if (!resolvedText) return { replyText: '', resolvedText: '' }; ai.appendLog('🎙 سمعتك: ' + resolvedText, 'user'); }
+      const tools = allDecls.map(d => ({ type: 'function', function: { name: d.name, description: d.description, parameters: ai.lowercaseSchemaTypes(d.parameters || { type: 'OBJECT', properties: {} }) } }));
+      const isOpenAi = mdl.startsWith('openai:'), endpoint = isOpenAi ? 'https://api.openai.com/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions';
+      const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (isOpenAi ? this.getOpenAiKey() : this.getGroqKey()) };
+      const apiModel = mdl.slice(mdl.indexOf(':') + 1), finalLine = `[SIM_SNAPSHOT] ${JSON.stringify(this.execInspectState())}\n\nUSER: ${resolvedText}`;
+      const uContent = (isOpenAi && b64) ? [{ type: 'text', text: finalLine }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } }] : finalLine;
+      const messages = [{ role: 'system', content: sysPrompt }, ...this.turnHistory.slice(-6), { role: 'user', content: uContent }];
+      for (let round = 0; round < 5; round++) {
+        const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ model: apiModel, messages, tools }) });
+        const data = await res.json().catch(() => ({})); if (!res.ok) { const err = new Error(`${mdl} ${res.status}: ${data.error?.message || res.statusText}`); err.status = res.status; throw err; }
+        const msg = data.choices?.[0]?.message || {}; messages.push(msg); if (msg.content) replyText += (replyText ? ' ' : '') + msg.content;
+        if (!msg.tool_calls?.length) break;
+        for (const tc of msg.tool_calls) { let args = {}; try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {} messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(await this.executeToolCall(tc.function?.name, args)) }); }
+      }
+      return { replyText, resolvedText };
+    }
+
+    const parts = [{ text: contextLine }];
+    if (audioWavBlob) parts.push({ inlineData: { mimeType: 'audio/wav', data: await blobToB64(audioWavBlob) } });
+    if (b64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+    const contents = [{ role: 'user', parts }], tools = [{ functionDeclarations: allDecls }];
+    for (let round = 0; round < 5; round++) {
+      let data = null, ok = false, lastStatus = 500, lastMsg = '';
+      for (let att = 0; att < 2; att++) {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey }, body: JSON.stringify({ systemInstruction: { parts: [{ text: sysPrompt }] }, contents, tools }) });
+        data = await res.json().catch(() => ({})); if (res.ok) { ok = true; break; }
+        lastStatus = res.status; lastMsg = data.error?.message || res.statusText;
+        if ((res.status === 503 || res.status === 429) && att === 0) { await ai.sleepMs(500); continue; }
+        break;
+      }
+      if (!ok) { const err = new Error(`Gemini (${mdl}) ${lastStatus}: ${lastMsg}`); err.status = lastStatus; throw err; }
+      const cParts = data.candidates?.[0]?.content?.parts || []; contents.push({ role: 'model', parts: cParts });
+      replyText += cParts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join(' ');
+      const fCalls = cParts.filter(p => p.functionCall).map(p => p.functionCall); if (!fCalls.length) break;
+      const fResps = []; for (const fc of fCalls) fResps.push({ functionResponse: { name: fc.name, response: await this.executeToolCall(fc.name, fc.args || {}) } });
+      contents.push({ role: 'user', parts: fResps });
+    }
+    return { replyText, resolvedText };
+  }
+
+  async runMultimodalTurn(userText, audioWavBlob = null) {
+    if (!this.enabled || this.turnBusy || (!userText && !audioWavBlob)) return;
+    this.turnBusy = true;
+    ai.appendLog(userText ? ('💬 أنت: ' + userText) : '🎙 أنت: (رسالة صوتية)', 'user');
+    this.setState('user_speaking', this.modelName); say('🤖 الكرة تفكر...');
+    try {
+      const sysPrompt = this.buildSystemInstruction() + `\n\nKeep replies warm, concise (1-2 sentences). Execute the right tool immediately.`;
+      const allDecls = this.getAllFunctionDeclarations(), b64 = this.latestVisionB64;
+      const chain = await ai.getSmartProviderChain(this.modelName);
+      let out = null, usedMdl = chain[0], lastErr = null;
+      for (let i = 0; i < chain.length; i++) {
+        const mdl = chain[i];
+        try { out = await this.runSingleModelTurn(mdl, userText, audioWavBlob, sysPrompt, allDecls, b64); usedMdl = mdl; break; }
+        catch (err) { lastErr = err; if (!ai.isRecoverableApiError(err.status, err.message) && i === chain.length - 1) throw err; }
+      }
+      if (!out) throw lastErr || new Error('تعذر الرد');
+      if (!out.replyText && !out.resolvedText) { if (this.connected) this.setState('watching'); return; }
+      const replyText = out.replyText.trim() || 'تم!', finalUser = out.resolvedText || userText;
+      if (finalUser) { this.turnHistory.push({ role: 'user', content: finalUser }, { role: 'assistant', content: replyText }); if (this.turnHistory.length > 10) this.turnHistory.splice(0, 2); }
+      ai.appendLog(`🤖 الكرة (${usedMdl}): ${replyText}`, 'bot'); say('🤖 ' + replyText.slice(0, 70));
+      await this.speakExpressive(replyText, this.mood);
+      if (NOW() > this.stateFlashUntil && this.connected) this.setState('watching');
+    } catch (e) { ai.appendLog('❌ ' + e.message, 'err'); if (this.connected) this.setState('error', e.message.slice(0, 32)); }
+    finally { this.turnBusy = false; }
+  }
+
+  async startAudioInput() {
+    this.stopAudioInput();
+    this.inStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const AC = window.AudioContext || window.webkitAudioContext; this.inCtx = new AC(); if (this.inCtx.state === 'suspended') await this.inCtx.resume();
+    this.inSource = this.inCtx.createMediaStreamSource(this.inStream);
+    this.inPcmAccum = []; this.inPcmLen = 0; this.vadNoise = 0.004; this.vadCalibUntil = NOW() + 0.45;
+    if ($('vuWrap')) $('vuWrap').style.display = 'block';
+    const pushSamples = float32 => {
+      if (!this.enabled) return;
+      let sum = 0; for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
+      const rms = Math.sqrt(sum / float32.length); this.inRms = this.inRms * 0.65 + rms * 0.35;
+      if ($('vuBar')) $('vuBar').style.width = Math.min(100, Math.round(rms * 1500)) + '%';
+      const now = NOW();
+      if (now < this.vadCalibUntil) { this.vadNoise = Math.min(0.015, this.vadNoise * 0.85 + rms * 0.15); return; }
+      const vadThr = Math.max(0.006, this.vadNoise * 2.1);
+      if (rms > vadThr && this.connected && now > this.aiSpeakingUntil && now > this.stateFlashUntil) { if (this.state !== 'user_speaking') this.setState('user_speaking'); }
+      else if (rms <= vadThr && this.state === 'user_speaking' && now > this.stateFlashUntil) this.setState('watching');
+      if (!this.connected) return;
+      if (!this.multimodalTurnMode && this.ws?.readyState === WebSocket.OPEN) {
+        const pcm16 = downsampleTo16kInt16(float32, this.inCtx.sampleRate); this.inPcmAccum.push(pcm16); this.inPcmLen += pcm16.length;
+        if (this.inPcmLen >= 1600) { const m = new Int16Array(this.inPcmLen); let o = 0; for (const c of this.inPcmAccum) { m.set(c, o); o += c.length; } this.inPcmAccum = []; this.inPcmLen = 0; this.sendWs({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: uint8ToB64(new Uint8Array(m.buffer)) } } }); }
+        return;
+      }
+      const copy = new Float32Array(float32);
+      if (this.turnVadSpeaking) this.turnSpeechChunks.push(copy); else { this.turnPreRoll.push(copy); if (this.turnPreRoll.length > 8) this.turnPreRoll.shift(); }
+      if (rms > vadThr && now > this.aiSpeakingUntil) { if (!this.turnVadSpeaking) { this.turnVadSpeaking = true; this.turnVadStart = now; this.turnSpeechChunks = [...this.turnPreRoll]; say('🎙 الكرة تسمعك...'); } this.turnVadLastLoud = now; }
+      else if (this.turnVadSpeaking && (now - this.turnVadLastLoud > 0.62 || now - this.turnVadStart > 8.0)) {
+        const dur = this.turnVadLastLoud - this.turnVadStart; this.turnVadSpeaking = false; const chunks = this.turnSpeechChunks; this.turnSpeechChunks = [];
+        if (dur >= 0.22 && chunks.length && this.multimodalTurnMode && !this.turnBusy && APP.voice?.encodeWAV) {
+          const wav = APP.voice.encodeWAV(chunks, this.inCtx.sampleRate, 16000);
+          if (wav && (aiState.geminiKey || this.getGroqKey().startsWith('gsk_'))) this.runMultimodalTurn('', wav);
+        }
+      }
+    };
+    this.inProc = this.inCtx.createScriptProcessor(2048, 1, 1); const tiny = this.inCtx.createGain(); tiny.gain.value = 0.00001;
+    this.inProc.onaudioprocess = e => pushSamples(new Float32Array(e.inputBuffer.getChannelData(0)));
+    this.inSource.connect(this.inProc); this.inProc.connect(tiny); tiny.connect(this.inCtx.destination);
+    window._livePinAudio = [this.inSource, this.inProc, tiny];
+  }
+  stopAudioInput() { this.inRms = 0; window._livePinAudio = null; if (!APP.voice?.micOn && $('vuWrap')) $('vuWrap').style.display = 'none'; try { this.inProc?.disconnect(); } catch {} this.inProc = null; try { this.inSource?.disconnect(); } catch {} this.inSource = null; if (this.inStream) { this.inStream.getTracks().forEach(t => t.stop()); this.inStream = null; } if (this.inCtx) { try { this.inCtx.close(); } catch {} this.inCtx = null; } }
+  async ensureAudioOutput() { if (!this.outCtx) { const AC = window.AudioContext || window.webkitAudioContext; this.outCtx = new AC(); this.outGain = this.outCtx.createGain(); this.outGain.gain.value = this.muted ? 0 : 1; this.outAnalyser = this.outCtx.createAnalyser(); this.outAnalyser.fftSize = 256; this.outTimeData = new Float32Array(this.outAnalyser.fftSize); this.reconnectOutputGraph(); } if (this.outCtx.state === 'suspended') await this.outCtx.resume(); this.nextPlayAt = Math.max(this.nextPlayAt, this.outCtx.currentTime); }
+  playPcm24k(b64) { if (!this.outCtx || !this.outGain) return; const samples = b64Pcm16ToFloat32(b64); if (!samples.length) return; const buf = this.outCtx.createBuffer(1, samples.length, 24000); buf.getChannelData(0).set(samples); const src = this.outCtx.createBufferSource(); src.buffer = buf; src.connect(this.outGain); const now = this.outCtx.currentTime, startAt = Math.max(now + 0.015, this.nextPlayAt); src.start(startAt); this.nextPlayAt = startAt + buf.duration; this.aiSpeakingUntil = NOW() + (this.nextPlayAt - now) + 0.15; this.outSources.add(src); src.onended = () => this.outSources.delete(src); if (NOW() > this.stateFlashUntil && this.state !== 'ai_speaking') this.setState('ai_speaking'); }
+  clearPlaybackQueue() { for (const s of [...this.outSources]) try { s.stop(); } catch {} this.outSources.clear(); if (this.outCtx) this.nextPlayAt = this.outCtx.currentTime; this.aiSpeakingUntil = 0; }
+  stopAudioOutput() { this.clearPlaybackQueue(); if (this.outCtx) { try { this.outCtx.close(); } catch {} this.outCtx = null; } this.outGain = null; this.outAnalyser = null; this.outRms = 0; }
+  setMuted(m) { this.muted = Boolean(m); if (this.outGain && this.outCtx) this.outGain.gain.setValueAtTime(this.muted ? 0 : 1, this.outCtx.currentTime); if (this.muted) try { window.speechSynthesis?.cancel(); } catch {} this.refreshUI(); }
+
+  buildSystemInstruction() {
+    const mode = APP.execMode || 'both';
+    const activeNames = entities.slice(-10).map(e => `${e.name}(${e.type})`).join(', ') || 'none';
+    const imgNames = [...importedImages.keys()].join(', ') || 'none';
+    const glbNames = [...importedGLBs.keys()].join(', ') || 'none';
+
+    // MODE 1: INSTRUCTIONS ONLY -> Voice Command Dispatcher for prescript @abilities ONLY!
+    if (mode === 'instructions') {
+      const prescripts = (APP.parsedAbilities || [])
+        .filter(a => !a.autorun && !a.fallback)
+        .map(a => `${a.id}: [${a.matches.slice(0, 4).join(', ')}]`)
+        .join(' | ');
+      return `You are the Robotic Sphere in INSTRUCTIONS-ONLY MODE (Voice Command Dispatcher).
+CRITICAL RULES:
+- DO NOT invent or build custom 3D objects with AI!
+- Your ONLY job is to listen to the user's voice/text command and trigger the closest prescript @ability below using \`run_prescript_ability\`.
+- Available prescript abilities: ${prescripts || 'delete_all, env_construct, env_matrix'}
+ACTIVE SCENE: ${activeNames}`;
+    }
+
+    // MODE 2: AI ONLY -> Fast Pure Creativity (ignore repo instructions completely)
+    if (mode === 'ai') {
+      return `You are the Robotic Sphere AI in AI-ONLY MODE (Fast Pure Creativity).
+IGNORE all repository .txt instructions and prescripts. Rely 100% on your own creativity & speed!
+- Build photorealistic, detailed 3D models from scratch via \`create_procedural_object\` using \`APP.craft\` (mat, lathe, tube, organicSphere, bevelBox, waterJet) + \`THREE\`.
+- NEVER ask for missing .glb files unless imported (${glbNames}).
+- Call \`edit_html_live\` for HTML/UI edits, \`manage_toolbar\` for toolbar buttons, \`apply_or_generate_texture\` for textures.
+ACTIVE SCENE: ${activeNames} | PHOTOS: ${imgNames} | MODEL: ${this.modelName}`;
+    }
+
+    // MODE 3: BOTH -> Art student inspired by master teacher's notes
+    const repoInspirations = [...loadedTxtFiles.entries()]
+      .filter(([k]) => !/^(craft_3d|ai_models|toolbar_ui|ai_studio|bot_brain|voice_stt|core_abilities)\.txt$/i.test(k))
+      .map(([k, v]) => `[${k}]: ${v.slice(0, 650)}`)
+      .join('\n');
+    return `You are the Robotic Sphere AI in INSPIRATION + AI MODE — like a talented art student learning physics, shader style, interaction craft, and techniques from the teacher's notes below, then creating original, evolved, photorealistic 3D masterpieces!
+
+=== TEACHER'S NOTES (INSPIRATION ONLY) ===
+${repoInspirations.slice(0, 3200)}
+
+RULES:
+- Sculpt detailed 18-35 part realistic 3D models using \`create_procedural_object\` with \`APP.craft\` + \`THREE\`.
+- NEVER look for missing .glb files unless imported (${glbNames}).
+- Call \`edit_html_live\` for HTML/UI edits, \`manage_toolbar\` for buttons, \`apply_or_generate_texture\` for textures.
+ACTIVE SCENE: ${activeNames} | PHOTOS: ${imgNames} | GLBS: ${glbNames} | MODEL: ${this.modelName}`;
+  }
+
+  getAllFunctionDeclarations() {
+    const mode = APP.execMode || 'both';
+    const navAndState = [
+      { name: 'run_prescript_ability', description: 'Run a prescript @ability from the repository by ability_id or spoken command.', parameters: { type: 'OBJECT', properties: { ability_id: { type: 'STRING' }, command: { type: 'STRING' } } } },
+      { name: 'move_bot_navigation', description: 'Move sphere: smart, stay, autonomous, orbit, come_here, go_to_object.', parameters: { type: 'OBJECT', properties: { mode: { type: 'STRING' }, target: { type: 'STRING' }, x: { type: 'NUMBER' }, y: { type: 'NUMBER' }, z: { type: 'NUMBER' } }, required: ['mode'] } },
+      { name: 'inspect_simulation_state', description: 'Inspect live 3D entities and scene state.', parameters: { type: 'OBJECT', properties: {} } }
+    ];
+
+    if (mode === 'instructions') {
+      const botNavTools = [...this.dynamicTools.values()]
+        .filter(e => !/create|build|edit|write|html/i.test(e.declaration.name))
+        .map(e => e.declaration);
+      return [...navAndState, ...botNavTools];
+    }
+
+    const creative = [
+      { name: 'edit_html_live', description: 'Edit HTML/UI/CSS/DOM directly and apply live.', parameters: { type: 'OBJECT', properties: { instruction: { type: 'STRING' } }, required: ['instruction'] } },
+      { name: 'read_project_code', description: 'Read source code of any repo file or @ability.', parameters: { type: 'OBJECT', properties: { file: { type: 'STRING' }, ability_id: { type: 'STRING' } } } },
+      { name: 'manage_ability', description: 'Add, update, or delete an @ability block in any .txt file (including ai_models.txt) and commit to GitHub.', parameters: { type: 'OBJECT', properties: { action: { type: 'STRING' }, file: { type: 'STRING' }, ability_id: { type: 'STRING' }, match: { type: 'STRING' }, code: { type: 'STRING' }, autorun: { type: 'BOOLEAN' } }, required: ['action', 'ability_id'] } },
+      { name: 'write_repo_file', description: 'Create, replace, patch, or delete any file in GitHub.', parameters: { type: 'OBJECT', properties: { file: { type: 'STRING' }, action: { type: 'STRING' }, content: { type: 'STRING' }, search: { type: 'STRING' }, replace: { type: 'STRING' } }, required: ['file', 'action'] } },
+      { name: 'edit_project_code', description: 'Edit .txt/.html files via natural language.', parameters: { type: 'OBJECT', properties: { instruction: { type: 'STRING' } }, required: ['instruction'] } },
+      { name: 'manage_toolbar', description: 'Add, remove, hide, rename toolbar buttons.', parameters: { type: 'OBJECT', properties: { action: { type: 'STRING' }, id: { type: 'STRING' }, label: { type: 'STRING' }, command: { type: 'STRING' }, code: { type: 'STRING' }, target: { type: 'STRING' } }, required: ['action'] } },
+      { name: 'create_procedural_object', description: 'Sculpt realistic 3D models in Three.js using APP.craft + THREE.', parameters: { type: 'OBJECT', properties: { name: { type: 'STRING' }, code: { type: 'STRING' }, dist: { type: 'NUMBER' }, yaw: { type: 'NUMBER' } }, required: ['name', 'code'] } },
+      { name: 'attach_entity_behavior', description: 'Add animations, water, or effects onto an existing entity.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['code'] } },
+      { name: 'apply_or_generate_texture', description: 'Apply imported photo or generate texture onto a 3D object.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, image_name: { type: 'STRING' }, prompt: { type: 'STRING' } } } },
+      { name: 'switch_ai_model', description: 'Switch AI model for bot or coder.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, model: { type: 'STRING' } }, required: ['model'] } },
+      { name: 'log_user_feedback', description: 'Save user preference in ai_memory.json.', parameters: { type: 'OBJECT', properties: { category: { type: 'STRING' }, target: { type: 'STRING' }, sentiment: { type: 'STRING' }, preference_summary: { type: 'STRING' } }, required: ['category', 'target', 'sentiment', 'preference_summary'] } },
+      { name: 'apply_simulation_adaptation', description: 'Adjust gravity, wind, timeScale, ragdoll, object properties.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, scaleFactor: { type: 'NUMBER' }, color: { type: 'STRING' }, particles: { type: 'STRING' }, spin: { type: 'NUMBER' }, worldG: { type: 'NUMBER' }, worldTS: { type: 'NUMBER' }, ragdollMode: { type: 'BOOLEAN' } } } },
+      { name: 'evolve_project_instructions', description: 'Save a permanent learned rule.', parameters: { type: 'OBJECT', properties: { reason: { type: 'STRING' }, memory_rule: { type: 'STRING' } }, required: ['reason', 'memory_rule'] } }
+    ];
+    const dyn = [...this.dynamicTools.values()].map(e => e.declaration);
+    return [...navAndState, ...creative, ...dyn];
+  }
+
+  getToolDeclarations() { return [{ functionDeclarations: this.getAllFunctionDeclarations() }]; }
+  sendWs(p) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(p)); }
+  closeWebSocket() { if (this.ws) { try { this.ws.onopen = this.ws.onmessage = this.ws.onerror = this.ws.onclose = null; this.ws.close(); } catch {} this.ws = null; } }
+
+  async connectExactWebSocket(mdl) {
+    this._lastToolsSig = [...this.dynamicTools.keys()].sort().join(',');
+    for (const cfg of [{ apiVer: 'v1beta', minimal: false }, { apiVer: 'v1beta', minimal: true }]) {
+      if (!this.enabled) return;
+      try { await this.trySingleLiveHandshake(mdl, cfg.apiVer, cfg.minimal); return; } catch {}
+    }
+    this.connecting = false; throw new Error(`فشل الاتصال بـ ${mdl}`);
+  }
+  trySingleLiveHandshake(mdl, apiVer, minimal) {
+    this.closeWebSocket(); this.setState('connecting', mdl);
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${apiVer}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(aiState.geminiKey)}`;
+    return new Promise((resolve, reject) => {
+      let settled = false; const ws = new WebSocket(wsUrl); this.ws = ws;
+      const timer = setTimeout(() => { if (!settled) { settled = true; try { ws.close(); } catch {} reject(new Error('WS Timeout')); } }, 8500);
+      ws.onopen = () => {
+        const genConfig = { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: this.voiceName || 'Kore' } } } };
+        const setup = { model: `models/${mdl}`, generationConfig: genConfig, systemInstruction: { parts: [{ text: this.buildSystemInstruction() }] }, tools: this.getToolDeclarations() };
+        if (!minimal) { setup.inputAudioTranscription = {}; setup.outputAudioTranscription = {}; }
+        ws.send(JSON.stringify({ setup }));
+      };
+      ws.onmessage = async ev => {
+        try {
+          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : await ev.data.text());
+          if (msg.setupComplete && !settled) { settled = true; clearTimeout(timer); this.connected = true; this.connecting = false; this.multimodalTurnMode = false; this.setState('watching', mdl); this.urgentFrameAt = performance.now() + 250; ai.appendLog(`🟢 الكرة متصلة بـ (${mdl})!`, 'bot'); while (this.pendingTextQueue.length) this.sendTextFeedback(this.pendingTextQueue.shift()); resolve(); }
+          this.handleServerMessage(msg);
+        } catch {}
+      };
+      ws.onclose = () => { clearTimeout(timer); this.connected = false; this.connecting = false; this.refreshUI(); if (!settled) { settled = true; reject(new Error('WS Closed')); } };
+    });
+  }
+  handleServerMessage(msg) {
+    if (msg.toolCall?.functionCalls) this.handleToolCalls(msg.toolCall.functionCalls);
+    const sc = msg.serverContent; if (!sc) return;
+    if (sc.interrupted) this.clearPlaybackQueue();
+    if (sc.inputTranscription?.text) this.inputTranscriptBuf += sc.inputTranscription.text;
+    if (sc.outputTranscription?.text) this.outputTranscriptBuf += sc.outputTranscription.text;
+    if (sc.modelTurn?.parts) for (const part of sc.modelTurn.parts) if (part.inlineData?.data && String(part.inlineData.mimeType || '').startsWith('audio/pcm')) this.playPcm24k(part.inlineData.data);
+    if (sc.turnComplete) {
+      if (this.inputTranscriptBuf.trim()) { ai.appendLog('🎙 أنت: ' + this.inputTranscriptBuf.trim(), 'user'); this.inputTranscriptBuf = ''; }
+      if (this.outputTranscriptBuf.trim()) { ai.appendLog('🤖 الكرة: ' + this.outputTranscriptBuf.trim(), 'bot'); this.outputTranscriptBuf = ''; }
+      if (NOW() > this.aiSpeakingUntil && this.connected) this.setState('watching');
+    }
+  }
+
+  async executeToolCall(name, args = {}) {
+    try {
+      if (name === 'run_prescript_ability') {
+        if (args.ability_id) {
+          const ab = (APP.parsedAbilities || []).find(a => a.id.toLowerCase() === String(args.ability_id).toLowerCase());
+          if (ab) { await runAbility(ab, args.command || ab.id); return { ok: true, executed: ab.id }; }
+        }
+        if (args.command && APP.runPrescriptByText) return APP.runPrescriptByText(args.command);
+        return { ok: false, error: 'Prescript ability not found' };
+      }
+      if (name === 'edit_html_live') return await APP.editHtmlFromPrompt(args.instruction || '', { forceHtml: true, fromMainTape: true, autoCommitIfToken: Boolean(aiState.githubToken) });
+      if (name === 'edit_project_code') return await APP.editHtmlFromPrompt(args.instruction || '', { fromMainTape: true });
+      if (name === 'read_project_code') { const files = await github.getWorkingRepoFiles(true); if (args.file) return { ok: true, content: (files[args.file] || '').slice(0, 20000) }; return { ok: true, files: Object.keys(files), index: getAbilityFileIndex() }; }
+      if (name === 'manage_ability') {
+        const fn = String(args.file || 'abilities.txt'), abId = String(args.ability_id || '');
+        const snap = aiState.githubToken ? await github.getGitHubSnapshot().catch(() => null) : null;
+        const base = snap?.[fn]?.content ?? loadedTxtFiles.get(fn) ?? '';
+        const block = args.action === 'delete' ? '' : [`@ability: ${abId}`, args.autorun ? '@autorun' : '', args.match ? `@match: ${args.match}` : '', '@code:', args.code].filter(Boolean).join('\n');
+        const next = github.applyAbilityEdit(base, { file: fn, action: args.action === 'delete' ? 'delete_ability' : 'upsert_ability', abilityId: abId, abilityBlock: block });
+        loadedTxtFiles.set(fn, next); parseAbilitiesTxt(getMergedAbilitiesText()); saveFilesCache();
+        if (aiState.githubToken) await github.commitDirectToGitHub([{ path: fn, content: next }], `Bot: ${args.action} ${abId}`);
+        return { ok: true, file: fn, abilityId: abId };
+      }
+      if (name === 'write_repo_file') {
+        const fn = String(args.file || '');
+        const snap = aiState.githubToken ? await github.getGitHubSnapshot().catch(() => null) : null;
+        const base = snap?.[fn]?.content ?? loadedTxtFiles.get(fn) ?? '';
+        const next = args.action === 'patch' ? base.replace(args.search, args.replace ?? '') : String(args.content ?? '');
+        if (/\.txt$/i.test(fn)) { loadedTxtFiles.set(fn, next); parseAbilitiesTxt(getMergedAbilitiesText()); saveFilesCache(); }
+        if (aiState.githubToken && args.action !== 'delete') await github.commitDirectToGitHub([{ path: fn, content: next }], `Bot: ${args.action} ${fn}`);
+        return { ok: true, file: fn };
+      }
+      if (name === 'manage_toolbar') {
+        const act = String(args.action || '').toLowerCase();
+        if (act === 'add' || act === 'add_button') return toolbar.add(args);
+        if (act === 'remove' || act === 'remove_button' || act === 'hide_button') return toolbar.remove(args.target || args.id || args.label);
+        if (act === 'open_xr') return toolbar.openXR();
+        if (act === 'close_xr') return toolbar.closeXR();
+        return toolbar.list();
+      }
+      if (name === 'create_procedural_object') { const r = await createProcedural(args); if (r.ok) this.flashState('learning', '✨ صُنع مجسم!', r.name, 2.5); return r; }
+      if (name === 'attach_entity_behavior') return await attachEntityScript(args.target || 'last', args.code || '');
+      if (name === 'apply_or_generate_texture') return await applyTexture(args.target || 'last', args);
+      if (name === 'switch_ai_model') { $('liveBotModel').value = args.model; this.modelName = args.model; localStorage.setItem('ai_live_model', args.model); if (this.enabled) this.startLiveSession().catch(() => {}); return { ok: true, model: args.model }; }
+      if (name === 'move_bot_navigation') { if (args.mode === 'come_here') { const tp = headPos.clone().addScaledVector(headFwd, 0.95); this.setNavMode('stay', tp); this.flyTo(tp, 6.5); setTimeout(() => this.clearFlight(), 900); } else this.setNavMode(args.mode); return { ok: true, mode: this.navMode }; }
+      if (name === 'log_user_feedback') { this.memory.learnedRules.push(args.preference_summary); this.saveLocalMemory(); this.scheduleGitHubMemorySync(); return { ok: true }; }
+      if (name === 'apply_simulation_adaptation') { if (args.worldG !== undefined) APP.worldG = Number(args.worldG); if (args.worldTS !== undefined) APP.worldTS = Number(args.worldTS); if (args.ragdollMode !== undefined) APP.setRagdollMode?.(Boolean(args.ragdollMode)); if (entities.length) modify({ target: args.target || 'last', ...args }); return { ok: true }; }
+      if (name === 'evolve_project_instructions') { this.memory.learnedRules.push(args.memory_rule); this.saveLocalMemory(); this.scheduleGitHubMemorySync(1000); return { ok: true }; }
+      if (name === 'inspect_simulation_state') return this.execInspectState();
+      if (this.dynamicTools.has(name)) return await this.dynamicTools.get(name).handler(args, this);
+      return { ok: false, error: 'Unknown tool' };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
+  async handleToolCalls(calls) { const resps = []; for (const fc of calls) resps.push({ id: fc.id, name: fc.name, response: await this.executeToolCall(fc.name, fc.args || {}) }); this.sendWs({ toolResponse: { functionResponses: resps } }); }
+
+  execInspectState() {
+    return { ok: true, execMode: APP.execMode, model: this.modelName, navMode: this.navMode, importedImages: [...importedImages.keys()], importedGLBs: [...importedGLBs.keys()], activeEntities: entities.map(e => ({ id: e.id, name: e.name, type: e.type })), physics: { worldG: APP.worldG, worldTS: APP.worldTS, ragdollMode: APP.ragdollMode } };
+  }
+  recordTelemetry() {}
+
+  captureVisionFrameIfDue(activeCam) {
+    if (!this.enabled || !this.connected) return;
+    const nowMs = performance.now(); if (nowMs - this.lastFrameAt < this.frameIntervalMs) return; this.lastFrameAt = nowMs; this.shutterPulse = 1.0;
+    try {
+      if (!renderer.xr.isPresenting) { this.visionCtx.drawImage(renderer.domElement, 0, 0, 512, 288); }
+      const b64 = this.visionCanvas.toDataURL('image/jpeg', 0.55).split(',')[1];
+      if (b64) { this.latestVisionB64 = b64; if (!this.multimodalTurnMode) this.sendWs({ realtimeInput: { video: { mimeType: 'image/jpeg', data: b64 } } }); }
+    } catch {}
+  }
+
+  step(dt0, t, activeCam) {
+    const now = NOW();
+    if (this.dissolveTime !== null) {
+      const p = clamp(1 - (now - this.dissolveTime) / 0.85, 0, 1); this.rootGroup.scale.setScalar(Math.max(0.01, p));
+      if (p <= 0) { this.dissolveTime = null; this.rootGroup.visible = false; this.rootGroup.scale.setScalar(1); }
+    } else if (this.enabled) {
+      const p = clamp((now - this.birthTime) / 0.65, 0, 1); this.rootGroup.scale.setScalar(Math.max(0.05, 1 - Math.pow(1 - p, 3)));
+    }
+    if (!this.rootGroup.visible) return;
+    const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+    const toBot = this.pos.clone().sub(headPos), botDist = toBot.length(), gazeDot = botDist > 1e-4 ? toBot.clone().divideScalar(botDist).dot(headFwd) : 0, lookingAtBot = gazeDot > 0.66;
+    let desiredPos = this.anchorPos.clone(), followSpeed = 3.8;
+    if (this.flightTarget) { desiredPos.copy(this.flightTarget.pos); followSpeed = this.flightTarget.speed || 7.2; this.anchorPos.copy(this.pos); }
+    else if (this.navMode === 'stay') { desiredPos.copy(this.anchorPos); desiredPos.y += Math.sin(t * 2) * 0.03; }
+    else {
+      if (!lookingAtBot && (botDist > 2.85 || botDist < 0.48)) { const side = renderer.xr.isPresenting ? 0.6 : 0.42; this.anchorPos.lerp(headPos.clone().addScaledVector(headFwd, 1.28).addScaledVector(right, side), 1 - Math.exp(-2.2 * dt0)); }
+      desiredPos.copy(this.anchorPos); desiredPos.y = clamp(desiredPos.y + Math.sin(t * 2.0) * 0.036, 0.65, 2.35);
+    }
+    const prevPos = this.pos.clone(); this.pos.lerp(desiredPos, 1 - Math.exp(-followSpeed * dt0)); this.pos.addScaledVector(this.recoilVel, dt0); this.recoilVel.multiplyScalar(Math.exp(-6.5 * dt0));
+    if (dt0 > 1e-4) this.vel.copy(this.pos).sub(prevPos).multiplyScalar(1 / dt0);
+    this.rootGroup.position.copy(this.pos); this.shutterPulse = Math.max(0, this.shutterPulse - dt0 * 3.8);
+    if (this.controller?.onStep) { try { this.controller.onStep(dt0, t, { pos: this.pos, vel: this.vel, right, headPos, headFwd, lookingAtBot, navMode: this.navMode, state: this.state, mood: this.mood, inRms: this.inRms, outRms: this.outRms, audioEnergy: Math.max(this.outRms * 5, this.inRms * 4), shutterPulse: this.shutterPulse, inspectPoint: this.inspectPoint, inspectUntil: this.inspectUntil, hands, activeCam }); } catch {} }
+    else if (this.fallbackRig.group.visible) { this.fallbackRig.ring.rotation.z += dt0 * 1.4; this.fallbackRig.ring.rotation.y += dt0 * 0.8; }
+    this.captureVisionFrameIfDue(activeCam);
+  }
+}
+
+const liveCompanion = new LiveCompanionEngine();
+APP.liveCompanion = liveCompanion; APP.bot = liveCompanion; window.liveCompanion = liveCompanion;
+
+stepHooks.set('bot_brain', (dt, t, dt0, activeCam) => liveCompanion.step(dt0, t, activeCam));
+pokeHooks.set('bot_brain', hand => {
+  if (!liveCompanion.rootGroup.visible) return false;
+  if (liveCompanion.controller?.tryInteract?.(hand)) return true;
+  if (!liveCompanion.fallbackRig.group.visible) return false;
+  let hitPt = null;
+  if (hand.isDesk) { const h = pointer.ray.intersectObject(liveCompanion.fallbackRig.hitProxy, false)[0]; if (h) hitPt = h.point; }
+  else if (hand.tipWp.distanceTo(liveCompanion.pos) < 0.22) hitPt = hand.tipWp.clone();
+  if (!hitPt) return false;
+  liveCompanion.recoilVel.addScaledVector(liveCompanion.pos.clone().sub(hitPt).normalize(), 1.25); sfx.play('click'); return true;
+});
+
+if (!window.__botBrainBound) {
+  window.__botBrainBound = true;
+  $('liveBotSwitch').onchange = e => liveCompanion.setEnabled(e.target.checked);
+  $('liveBotModel').value = liveCompanion.modelName;
+  $('liveBotVoice').value = liveCompanion.voiceName;
+  $('liveBotModel').onchange = e => { liveCompanion.modelName = e.target.value; localStorage.setItem('ai_live_model', liveCompanion.modelName); if (liveCompanion.enabled) liveCompanion.startLiveSession().catch(err => ai.appendLog('❌ ' + err.message, 'err')); };
+  $('liveBotVoice').onchange = e => { liveCompanion.voiceName = e.target.value; localStorage.setItem('ai_live_voice', liveCompanion.voiceName); };
+  $('liveMuteBtn').onclick = () => liveCompanion.setMuted(!liveCompanion.muted);
+  $('liveShowMemBtn').onclick = () => { const d = $('aiDiff'); d.textContent = JSON.stringify(liveCompanion.memory, null, 2); d.style.display = 'block'; };
+  $('aiSendLiveBtn').onclick = () => { const txt = ($('aiInput').value || '').trim(); if (!txt) return; $('aiInput').value = ''; liveCompanion.sendTextFeedback(txt); };
+}

@@ -1,0 +1,205 @@
+@ability: core_router_module
+@autorun
+@code:
+const { $, say, normalizeText, loadedTxtFiles, entities, importedImages, importedGLBs, shouldUseGLB, resolveGLB, spawnGLB, runAbility, ai } = APP;
+const aiState = ai.state;
+
+function isHtmlEditPrompt(rawText) {
+  const s = String(rawText || '');
+  return /(\bhtml\b|say-it-see-it\.html|الـ?\s*html|تعديل\s+(?:الصفحة|الواجهة|الكود|التصميم|الشريط)|عد[ّ]?ل\s+(?:الـ?\s*html|الصفحة|الواجهة|الشريط|زر|لون)|أضف\s+زر\s+(?:في|لـ)\s*(?:الصفحة|الواجهة|الشريط)|edit\s+html|patch\s+html|modify\s+(?:the\s+)?(?:html|page|ui|css))/i.test(s);
+}
+
+function getRepoInspirations() {
+  return [...loadedTxtFiles.entries()]
+    .filter(([k]) => !/^(craft_3d|ai_models|toolbar_ui|ai_studio|bot_brain|voice_stt|core_abilities)\.txt$/i.test(k))
+    .map(([fname, content]) => `--- ${fname} ---\n${content.slice(0, 1500)}`)
+    .join('\n\n')
+    .slice(0, 5200);
+}
+
+function matchBestAbility(norm, includeFallback = false) {
+  let best = null, bestScore = 0;
+  for (const ab of (APP.parsedAbilities || [])) {
+    if (ab.autorun) continue;
+    if (!includeFallback && ab.fallback) continue;
+    if (includeFallback && !ab.fallback) continue;
+    for (const pat of ab.matches) {
+      const terms = pat.split('&').map(t => normalizeText(t)).filter(Boolean);
+      if (terms.length && terms.every(t => norm.includes(t))) {
+        const sc = terms.length * 100 + terms.reduce((s, t) => s + t.length, 0);
+        if (sc > bestScore) { bestScore = sc; best = ab; }
+      }
+    }
+  }
+  return best;
+}
+
+async function creativeBuilder(rawText, mode = 'both') {
+  const isPureAi = mode === 'ai';
+  say(isPureAi ? '✨ إبداع سريع بالذكاء فقط...' : '⚡ إلهام من التعليمات + إبداع AI...');
+
+  const inspirations = isPureAi ? '' : getRepoInspirations();
+  const sys = isPureAi
+    ? `You are a fast, pure-creativity Three.js 3D Sculptor for "Say It, See It".
+IGNORE all external repo scripts. Rely 100% on your own artistic & 3D engineering genius.
+ACTIVE SCENE: ${entities.map(e => `${e.name}(${e.type})`).join(', ') || 'none'} | PHOTOS: ${[...importedImages.keys()].join(', ') || 'none'}
+RULES:
+- NEVER load .glb files unless imported (${[...importedGLBs.keys()].join(', ') || 'none'}).
+- Build fast, expressive, detailed 3D models from scratch using \`APP.craft\` + \`THREE\`:
+  * \`APP.craft.mat({ color, tex:'wood'|'stone'|'metal'|'carbon'|'ice'|'marble'|'gold'|'water'|'lava'|'brick'|'galaxy', rough, metal, clearcoat, emissive, opacity })\`
+  * \`APP.craft.lathe\`, \`APP.craft.tube\`, \`APP.craft.organicSphere\`, \`APP.craft.bevelBox\`, \`APP.craft.waterJet\`, \`THREE.PointLight\`, \`APP.onTick\`.
+- Output ONLY:
+<<<CREATE name="object_name">>>
+// Three.js code adding detailed meshes to group
+<<<END_CREATE>>>
+<<<SAY>>>
+تأكيد قصير
+<<<END_SAY>>>`
+    : `You are an inspired Three.js WebXR 3D Artist & Engineer — like an art student learning techniques, aesthetics, physics style, and craft from a master teacher's notes below, then creating original, richer, realistic 3D works of your own!
+
+=== TEACHER'S NOTES (INSPIRATION ONLY — DO NOT MERELY COPY OR SPAWN PLACEHOLDERS) ===
+${inspirations || 'Standard WebXR Three.js physics & interaction'}
+=== LEARNED TASTES ===
+${JSON.stringify(APP.liveCompanion?.memory?.learnedRules || [])}
+
+=== LIVE SCENE ===
+Active: ${entities.map(e => `${e.name}(${e.type})`).join(', ') || 'none'} | Photos: ${[...importedImages.keys()].join(', ') || 'none'} | GLBs: ${[...importedGLBs.keys()].join(', ') || 'none'}
+
+RULES:
+- Use the teacher's physics, interaction style, shader mood, and craftsmanship as INSPIRATION to create an original, photorealistic, museum-grade 3D work using \`APP.craft\` + \`THREE\` (18-35 sculpted parts, textures, lighting, subtle life animation via \`APP.onTick\`).
+- NEVER look for missing .glb files unless imported (${[...importedGLBs.keys()].join(', ') || 'none'}).
+- To modify/animate an existing entity, output <<<ATTACH target="last">>> ...JS... <<<END_ATTACH>>>.
+- To apply/generate a texture, output <<<JSON>>>{"toolCalls":[{"name":"apply_or_generate_texture","args":{"target":"last","image_name":"","prompt":"..."}}],"say":"..."}<<<END_JSON>>>.
+
+OUTPUT FORMAT:
+<<<CREATE name="object_name">>>
+// Original inspired Three.js code using APP.craft & THREE
+<<<END_CREATE>>>
+<<<SAY>>>
+رسالة تأكيد قصيرة بلغة المستخدم
+<<<END_SAY>>>`;
+
+  try {
+    const prevThink = $('aiThink') ? $('aiThink').value : 'high';
+    if (isPureAi && $('aiThink')) $('aiThink').value = 'low';
+    let res;
+    try { res = await ai.callAnyProviderRaw(sys, `USER REQUEST: ${rawText}`, $('aiModel')?.value); }
+    finally { if (isPureAi && $('aiThink')) $('aiThink').value = prevThink; }
+
+    const { text: raw, modelUsed } = res;
+    let didSomething = false;
+
+    const createRe = /<<<CREATE(?:\s+name\s*=\s*["']([^"']+)["'])?\s*>>>([\s\S]*?)<<<END_CREATE>>>/gi;
+    let m;
+    while ((m = createRe.exec(raw)) !== null) {
+      const r = await APP.liveCompanion.executeToolCall('create_procedural_object', { name: m[1] || 'creation', code: m[2].trim() });
+      if (r.ok) didSomething = true;
+    }
+
+    const attachRe = /<<<ATTACH(?:\s+target\s*=\s*["']([^"']+)["'])?\s*>>>([\s\S]*?)<<<END_ATTACH>>>/gi;
+    while ((m = attachRe.exec(raw)) !== null) {
+      const r = await APP.liveCompanion.executeToolCall('attach_entity_behavior', { target: m[1] || 'last', code: m[2].trim() });
+      if (r.ok) didSomething = true;
+    }
+
+    const jsonM = raw.match(/<<<JSON>>>([\s\S]*?)<<<END_JSON>>>/i);
+    if (!didSomething) {
+      try {
+        const obj = ai.parseJsonSafe(jsonM ? jsonM[1] : raw);
+        if (Array.isArray(obj.toolCalls)) {
+          for (const tc of obj.toolCalls) {
+            const r = await APP.liveCompanion.executeToolCall(tc.name, tc.args || {});
+            if (r?.ok !== false) didSomething = true;
+          }
+          if (obj.say) say(`✅ (${modelUsed}) ${obj.say}`);
+        }
+      } catch {}
+    }
+
+    const sayM = raw.match(/<<<SAY>>>([\s\S]*?)<<<END_SAY>>>/i);
+    if (didSomething) {
+      say(sayM ? `✅ (${modelUsed}) ${sayM[1].trim()}` : `✅ تم الإنشاء عبر ${modelUsed}`);
+      return;
+    }
+    say('⚠️ لم يتم توليد الشكل — جرّب وصفاً أوضح.');
+  } catch (e) {
+    console.warn('Creative builder err:', e);
+    say('❌ ' + (e.message || e));
+  }
+}
+
+APP.runPrescriptByText = function (rawText) {
+  const norm = normalizeText(rawText);
+  if (!norm) return { ok: false, error: 'Empty command' };
+  const ab = matchBestAbility(norm, false) || matchBestAbility(norm, true);
+  if (ab) { runAbility(ab, rawText); return { ok: true, ability: ab.id }; }
+  return { ok: false, error: 'لم يطابق أي تعليمة مكتوبة في الملفات' };
+};
+
+APP.router = function (rawText) {
+  const norm = normalizeText(rawText);
+  if (!norm) return false;
+  const mode = APP.execMode || 'both';
+
+  // MODE 1: INSTRUCTIONS ONLY — No AI building! Robot ball only acts as a voice/text trigger for prescript logic.
+  if (mode === 'instructions') {
+    const direct = APP.runPrescriptByText(rawText);
+    if (direct.ok) return true;
+    if (APP.liveCompanion?.enabled) {
+      APP.liveCompanion.sendTextFeedback(rawText);
+      return true;
+    }
+    say('📜 وضع التعليمات فقط: لم يطابق أي تعليمة مكتوبة');
+    return false;
+  }
+
+  // HTML live edit in 'ai' and 'both' modes
+  if (isHtmlEditPrompt(rawText)) {
+    APP.editHtmlFromPrompt?.(rawText, { forceHtml: true, fromMainTape: true, autoCommitIfToken: Boolean(aiState.githubToken) });
+    return true;
+  }
+
+  // Imported GLB explicit check
+  if (shouldUseGLB(rawText)) {
+    const file = resolveGLB(rawText), base = file.replace(/\.(glb|gltf)$/i, '');
+    if (importedGLBs.has(file) || importedGLBs.has(base + '.glb')) {
+      say('📦 ' + file);
+      spawnGLB({ file, name: base, height: 1.4 });
+      return true;
+    }
+  }
+
+  // MODE 2: AI ONLY — Ignore all instructions/prescripts, fast pure creativity!
+  if (mode === 'ai') {
+    if (APP.liveCompanion?.enabled) { APP.liveCompanion.sendTextFeedback(rawText); return true; }
+    creativeBuilder(rawText, 'ai');
+    return true;
+  }
+
+  // MODE 3: BOTH — Core utilities + AI inspired by instructions (art student learning from teacher)
+  const isCoreCommand = /^(delete|clear|احذف|امسح|construct|matrix|ragdoll|stop|توقف|اخرج|exit)\b/i.test(norm);
+  if (isCoreCommand) {
+    const ab = matchBestAbility(norm, false);
+    if (ab) { runAbility(ab, rawText); return true; }
+  }
+  if (APP.liveCompanion?.enabled) { APP.liveCompanion.sendTextFeedback(rawText); return true; }
+  creativeBuilder(rawText, 'both');
+  return true;
+};
+
+if (aiState.githubToken && !window.__memPulledOnce) {
+  window.__memPulledOnce = true;
+  APP.liveCompanion?.pullMemoryFromGitHub?.();
+}
+
+@ability: delete_all
+@match: delete | clear | احذف | امسح
+@do: APP.clear();
+
+@ability: env_construct
+@match: construct | كونستراكت | الغرفة البيضاء
+@do: APP.setEnv('construct_gray'); APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 5);
+
+@ability: env_matrix
+@match: matrix | ماتريكس
+@do: APP.setEnv('matrix_black'); APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 5);
