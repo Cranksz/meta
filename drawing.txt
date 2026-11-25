@@ -122,58 +122,85 @@ const pointToSeg = (p, a, b, out) => {
   out.copy(a).addScaledVector(ab, t); return { dist: p.distanceTo(out), t };
 };
 
+const isValidPt = (p) => !!(p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+
 const computeFrames = (pts) => {
-  const n = pts.length, T = [], N = [], B = [];
+  const n = Array.isArray(pts) ? pts.length : 0;
+  const T = [], N = [], B = [];
+  if (n === 0) return { T, N, B };
+  if (n === 1 || !isValidPt(pts[0]) || !isValidPt(pts[1])) {
+    for (let i = 0; i < n; i++) {
+      T.push(new THREE.Vector3(0, 1, 0));
+      N.push(new THREE.Vector3(1, 0, 0));
+      B.push(new THREE.Vector3(0, 0, 1));
+    }
+    return { T, N, B };
+  }
   for (let i = 0; i < n; i++) {
     const t = new THREE.Vector3();
-    if (i === 0) t.subVectors(pts[1], pts[0]);
-    else if (i === n - 1) t.subVectors(pts[n - 1], pts[n - 2]);
-    else t.subVectors(pts[i + 1], pts[i - 1]);
+    const pCur = pts[i], pPrev = pts[i - 1], pNext = pts[i + 1];
+    if (i === 0 && isValidPt(pNext) && isValidPt(pCur)) t.subVectors(pNext, pCur);
+    else if (i === n - 1 && isValidPt(pCur) && isValidPt(pPrev)) t.subVectors(pCur, pPrev);
+    else if (isValidPt(pNext) && isValidPt(pPrev)) t.subVectors(pNext, pPrev);
     if (t.lengthSq() < 1e-10) t.set(0, 1, 0);
     t.normalize(); T.push(t);
   }
   const up = Math.abs(T[0].y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
-  const n0 = new THREE.Vector3().crossVectors(up, T[0]).normalize();
+  const n0 = new THREE.Vector3().crossVectors(up, T[0]);
+  if (n0.lengthSq() < 1e-10) n0.set(1, 0, 0);
+  n0.normalize();
   N.push(n0); B.push(new THREE.Vector3().crossVectors(T[0], n0).normalize());
   const q = new THREE.Quaternion();
   for (let i = 1; i < n; i++) {
     q.setFromUnitVectors(T[i - 1], T[i]);
-    const ni = N[i - 1].clone().applyQuaternion(q).normalize();
-    ni.addScaledVector(T[i], -ni.dot(T[i])).normalize();
+    const ni = N[i - 1].clone().applyQuaternion(q);
+    if (ni.lengthSq() < 1e-10) ni.copy(N[i - 1]); else ni.normalize();
+    ni.addScaledVector(T[i], -ni.dot(T[i]));
+    if (ni.lengthSq() < 1e-10) ni.copy(N[i - 1]); else ni.normalize();
     N.push(ni); B.push(new THREE.Vector3().crossVectors(T[i], ni).normalize());
   }
   return { T, N, B };
 };
 
 const writeWatertightTubeVerts = (pts, radius, radSegs, isRope, posArr) => {
+  if (!Array.isArray(pts) || pts.length === 0 || !posArr) return;
   const n = pts.length;
   const { N, B } = computeFrames(pts);
   const cols = radSegs + 1;
   for (let i = 0; i < n; i++) {
     const p = pts[i], ni = N[i], bi = B[i];
+    if (!isValidPt(p) || !ni || !bi) continue;
     const endTaper = (i === 0 || i === n - 1) ? 0.55 : 1.0;
     for (let j = 0; j < cols; j++) {
       const ang = (j / radSegs) * Math.PI * 2;
       const r = isRope ? radius * endTaper * (0.78 + 0.28 * Math.cos(3 * ang + i * 1.15)) : radius * endTaper;
       const ca = Math.cos(ang) * r, sa = Math.sin(ang) * r;
       const idx = (i * cols + j) * 3;
+      if (idx + 2 >= posArr.length) continue;
       posArr[idx] = p.x + ni.x * ca + bi.x * sa;
       posArr[idx + 1] = p.y + ni.y * ca + bi.y * sa;
       posArr[idx + 2] = p.z + ni.z * ca + bi.z * sa;
     }
   }
   // End-cap centers
+  const firstPt = pts[0], lastPt = pts[n - 1];
   const c0 = (n * cols) * 3, c1 = (n * cols + 1) * 3;
-  posArr[c0] = pts[0].x; posArr[c0 + 1] = pts[0].y; posArr[c0 + 2] = pts[0].z;
-  posArr[c1] = pts[n - 1].x; posArr[c1 + 1] = pts[n - 1].y; posArr[c1 + 2] = pts[n - 1].z;
+  if (isValidPt(firstPt) && c0 + 2 < posArr.length) {
+    posArr[c0] = firstPt.x; posArr[c0 + 1] = firstPt.y; posArr[c0 + 2] = firstPt.z;
+  }
+  if (isValidPt(lastPt) && c1 + 2 < posArr.length) {
+    posArr[c1] = lastPt.x; posArr[c1 + 1] = lastPt.y; posArr[c1 + 2] = lastPt.z;
+  }
 };
 
 const buildWatertightTubeGeo = (pts, radius, radSegs = 12, isRope = false) => {
-  const n = pts.length, cols = radSegs + 1;
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return new THREE.BufferGeometry();
+  const n = safePts.length, cols = radSegs + 1;
   const vCount = n * cols + 2;
   const posArr = new Float32Array(vCount * 3);
   const uvArr = new Float32Array(vCount * 2);
-  writeWatertightTubeVerts(pts, radius, radSegs, isRope, posArr);
+  writeWatertightTubeVerts(safePts, radius, radSegs, isRope, posArr);
   for (let i = 0; i < n; i++) for (let j = 0; j < cols; j++) {
     const k = (i * cols + j) * 2;
     uvArr[k] = i / Math.max(1, n - 1);
@@ -202,23 +229,29 @@ const buildWatertightTubeGeo = (pts, radius, radSegs = 12, isRope = false) => {
 };
 
 const writeFlatRibbonVerts = (pts, halfW, sideHint, posArr) => {
+  if (!Array.isArray(pts) || pts.length === 0 || !posArr) return;
   const n = pts.length;
   const { T, B } = computeFrames(pts);
   const side = new THREE.Vector3();
   for (let i = 0; i < n; i++) {
+    const p = pts[i], ti = T[i], bi = B[i];
+    if (!isValidPt(p) || !ti || !bi) continue;
     if (sideHint) {
-      side.crossVectors(T[i], sideHint);
-      if (side.lengthSq() < 1e-6) side.copy(B[i]); else side.normalize();
-    } else side.copy(B[i]);
-    const p = pts[i], k = i * 6;
+      side.crossVectors(ti, sideHint);
+      if (side.lengthSq() < 1e-6) side.copy(bi); else side.normalize();
+    } else side.copy(bi);
+    const k = i * 6;
+    if (k + 5 >= posArr.length) continue;
     posArr[k] = p.x - side.x * halfW; posArr[k + 1] = p.y - side.y * halfW; posArr[k + 2] = p.z - side.z * halfW;
     posArr[k + 3] = p.x + side.x * halfW; posArr[k + 4] = p.y + side.y * halfW; posArr[k + 5] = p.z + side.z * halfW;
   }
 };
 
 const buildFlatRibbonGeo = (pts, halfW, sideHint = null) => {
-  const n = pts.length, posArr = new Float32Array(n * 2 * 3), uvArr = new Float32Array(n * 2 * 2), indices = [];
-  writeFlatRibbonVerts(pts, halfW, sideHint, posArr);
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return new THREE.BufferGeometry();
+  const n = safePts.length, posArr = new Float32Array(n * 2 * 3), uvArr = new Float32Array(n * 2 * 2), indices = [];
+  writeFlatRibbonVerts(safePts, halfW, sideHint, posArr);
   for (let i = 0; i < n; i++) {
     const u = i / Math.max(1, n - 1);
     uvArr[i * 4] = u; uvArr[i * 4 + 1] = 0;
@@ -238,8 +271,9 @@ const buildFlatRibbonGeo = (pts, halfW, sideHint = null) => {
 };
 
 const buildTube = (pts, r, m) => {
-  if (pts.length < 2) return null;
-  const mesh = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), Math.min(240, Math.max(12, pts.length * 3)), r, 14, false), m);
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return null;
+  const mesh = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(safePts), Math.min(240, Math.max(12, safePts.length * 3)), r, 14, false), m);
   mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
 };
 
@@ -332,6 +366,7 @@ const makeGrassInstMat = () => {
 };
 
 const attachGrassBladesToPts = (parentGroup, localPts, radius) => {
+  if (!Array.isArray(localPts) || localPts.length < 2) return null;
   const count = clamp(localPts.length * 6, 80, 300);
   const inst = new THREE.InstancedMesh(sharedGrassBladeGeo, makeGrassInstMat(), count);
   inst.userData.skipMatrixShader = true;
@@ -342,7 +377,9 @@ const attachGrassBladesToPts = (parentGroup, localPts, radius) => {
   for (let i = 0; i < count; i++) {
     const t = i / (count - 1);
     const fIdx = t * (localPts.length - 1), sIdx = Math.min(localPts.length - 2, Math.floor(fIdx)), frac = fIdx - sIdx;
-    const base = localPts[sIdx].clone().lerp(localPts[sIdx + 1], frac);
+    const pA = localPts[sIdx], pB = localPts[sIdx + 1];
+    if (!isValidPt(pA) || !isValidPt(pB)) continue;
+    const base = pA.clone().lerp(pB, frac);
     const ang = Math.random() * Math.PI * 2, rOff = radius * 0.65;
     const off = new THREE.Vector3(Math.cos(ang) * rOff, Math.sin(ang) * rOff * 0.6 + radius * 0.2, Math.sin(ang) * rOff);
     dummy.position.copy(base).add(off);
@@ -436,10 +473,12 @@ const mkPetalTex = () => {
 };
 
 const classifyMagicStroke = (pts) => {
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return "fish";
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(APP.camera.quaternion).setY(0).normalize();
   if (right.lengthSq() < 0.01) right.set(1, 0, 0);
   const up = new THREE.Vector3(0, 1, 0);
-  const proj = pts.map(p => ({ x: p.dot(right), y: p.dot(up) }));
+  const proj = safePts.map(p => ({ x: p.dot(right), y: p.dot(up) }));
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const p of proj) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
   const W = Math.max(0.05, maxX - minX), H = Math.max(0.05, maxY - minY), aspect = W / H;
@@ -471,13 +510,15 @@ const classifyMagicStroke = (pts) => {
 };
 
 const spawnMagicCreation = async (pts) => {
-  const kind = classifyMagicStroke(pts);
-  const box = new THREE.Box3().setFromPoints(pts), center = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3()).length() * 0.55;
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return;
+  const kind = classifyMagicStroke(safePts);
+  const box = new THREE.Box3().setFromPoints(safePts), center = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3()).length() * 0.55;
   APP.sfx.play("magic");
   APP.fx.spawnBox(box, "sparks", 42);
   APP.say("✨ تحول الرسم إلى: " + kind);
 
-  if (kind === "fish" && APP._spawnFishFromStroke) { APP._spawnFishFromStroke(pts); return; }
+  if (kind === "fish" && APP._spawnFishFromStroke) { APP._spawnFishFromStroke(safePts); return; }
   if (kind === "butterfly") { APP._spawnButterfly(center, Math.max(0.18, Math.min(0.36, sz * 0.55))); return; }
 
   const url = APP.findGLB(kind + ".glb");
@@ -750,6 +791,7 @@ APP._spawn2DBoard = () => {
 // Stroke Finishing & 4 Physics Engines (Rigidbody, Softbody, Cloth, Grains)
 // ------------------------------------------------------------------------------
 const collideSphereWithScene = (p, vel, radius, bounciness = 0.25) => {
+  if (!isValidPt(p)) return;
   if (p.y < radius) {
     p.y = radius;
     if (vel && vel.y < 0) vel.y = -vel.y * bounciness;
@@ -818,7 +860,9 @@ const createBrushStrokeMesh = (localPts, radius, style, center, viewNormal) => {
 };
 
 const finishClothStroke = (pts, style) => {
-  const curve = new THREE.CatmullRomCurve3(pts);
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return;
+  const curve = new THREE.CatmullRomCurve3(safePts);
   const nx = clamp(Math.round(curve.getLength() / 0.06), 10, 30);
   const ny = 6, N = nx * ny;
   const P = new Float32Array(N * 3), Q = new Float32Array(N * 3);
@@ -832,11 +876,15 @@ const finishClothStroke = (pts, style) => {
     const vFrac = j / (ny - 1) - 0.5;
     for (let i = 0; i < nx; i++) {
       const idx = j * nx + i;
-      const side = new THREE.Vector3().crossVectors(spine[Math.min(nx - 1, i + 1)].clone().sub(spine[Math.max(0, i - 1)]), viewFwd);
-      if (side.lengthSq() < 1e-4) side.copy(B[i]); else side.normalize();
-      const px = spine[i].x + side.x * vFrac * ribbonW;
-      const py = spine[i].y + side.y * vFrac * ribbonW;
-      const pz = spine[i].z + side.z * vFrac * ribbonW;
+      const sPrev = spine[Math.max(0, i - 1)], sNext = spine[Math.min(nx - 1, i + 1)], sCur = spine[i];
+      if (!sCur || !sPrev || !sNext) continue;
+      const side = new THREE.Vector3().crossVectors(sNext.clone().sub(sPrev), viewFwd);
+      if (side.lengthSq() < 1e-4) {
+        if (B[i]) side.copy(B[i]); else side.set(1, 0, 0);
+      } else side.normalize();
+      const px = sCur.x + side.x * vFrac * ribbonW;
+      const py = sCur.y + side.y * vFrac * ribbonW;
+      const pz = sCur.z + side.z * vFrac * ribbonW;
       P[idx * 3] = Q[idx * 3] = px;
       P[idx * 3 + 1] = Q[idx * 3 + 1] = py;
       P[idx * 3 + 2] = Q[idx * 3 + 2] = pz;
@@ -922,6 +970,7 @@ const finishClothStroke = (pts, style) => {
               for (const hd of APP.hands) {
                 if (hd.isDesk && !hd.act) continue;
                 for (const hp of [hd.wp, hd.tipWp]) {
+                  if (!hp) continue;
                   const dx = P[k] - hp.x, dy = P[k + 1] - hp.y, dz = P[k + 2] - hp.z, d2 = dx * dx + dy * dy + dz * dz, rr = 0.065;
                   if (d2 < rr * rr && d2 > 1e-7) { const d = Math.sqrt(d2), ps = (rr - d) / d; P[k] += dx * ps; P[k + 1] += dy * ps; P[k + 2] += dz * ps; }
                 }
@@ -947,7 +996,9 @@ const finishClothStroke = (pts, style) => {
 };
 
 const finishGrainsStroke = (pts, style) => {
-  const curve = new THREE.CatmullRomCurve3(pts);
+  const safePts = Array.isArray(pts) ? pts.filter(isValidPt) : [];
+  if (safePts.length < 2) return;
+  const curve = new THREE.CatmullRomCurve3(safePts);
   const count = clamp(Math.round(curve.getLength() * 190), 120, 360);
   const grains = [];
   for (let i = 0; i < count; i++) {
@@ -958,7 +1009,7 @@ const finishGrainsStroke = (pts, style) => {
       r: 0.015 + Math.random() * 0.008
     });
   }
-  const box = new THREE.Box3().setFromPoints(pts), center = box.getCenter(new THREE.Vector3());
+  const box = new THREE.Box3().setFromPoints(safePts), center = box.getCenter(new THREE.Vector3());
   const geo = style === "glass" || style === "grass" ? new THREE.OctahedronGeometry(0.018, 0) : new THREE.IcosahedronGeometry(0.018, 1);
   const mat = makeBrushMaterial(style === "default" ? "rope" : style, center, false);
   const inst = new THREE.InstancedMesh(geo, mat, grains.length);
@@ -974,7 +1025,7 @@ const finishGrainsStroke = (pts, style) => {
       const h = Math.min(dt, 0.028);
       const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart), tk = tank ? tank.tankData : null;
       const blasts = [];
-      for (const hd of APP.hands) if (hd.act && hd.pokeHit) blasts.push({ pt: hd.pokeHit.point, r: 0.25, force: 3.2 });
+      for (const hd of APP.hands) if (hd.act && hd.pokeHit && isValidPt(hd.pokeHit.point)) blasts.push({ pt: hd.pokeHit.point, r: 0.25, force: 3.2 });
 
       for (let i = 0; i < grains.length; i++) {
         const a = grains[i];
@@ -1022,7 +1073,8 @@ const finishStroke = (h) => {
   const st = activeStrokes.get(h); activeStrokes.delete(h);
   if (!st) return;
   clearStrokePreview(st);
-  if (st.pts.length < 2) return;
+  const rawPts = Array.isArray(st.pts) ? st.pts.filter(isValidPt) : [];
+  if (rawPts.length < 2) return;
 
   const style = st.style || brushState.style;
   let physMode = st.physics || brushState.physics;
@@ -1032,15 +1084,15 @@ const finishStroke = (h) => {
   }
 
   // Magic Pen keeps AI shape classification when using default brush + no physics override (for full strokes)
-  if (st.isMagic && style === "default" && physMode === "none" && st.pts.length >= 4) {
-    spawnMagicCreation(st.pts);
+  if (st.isMagic && style === "default" && physMode === "none" && rawPts.length >= 4) {
+    spawnMagicCreation(rawPts);
     return;
   }
 
-  if (physMode === "cloth" && st.pts.length >= 3) { finishClothStroke(st.pts, style); return; }
-  if (physMode === "grains" && st.pts.length >= 3) { finishGrainsStroke(st.pts, style); return; }
+  if (physMode === "cloth" && rawPts.length >= 3) { finishClothStroke(rawPts, style); return; }
+  if (physMode === "grains" && rawPts.length >= 3) { finishGrainsStroke(rawPts, style); return; }
 
-  const curve = new THREE.CatmullRomCurve3(st.pts), pts = [];
+  const curve = new THREE.CatmullRomCurve3(rawPts), pts = [];
   const nS = clamp(Math.round(curve.getLength() / 0.032), 6, 48);
   for (let i = 0; i <= nS; i++) pts.push(curve.getPointAt(i / nS));
 
@@ -1088,6 +1140,7 @@ const finishStroke = (h) => {
       if (sObj.ent.heldBy) {
         loopMesh.updateMatrixWorld(true);
         for (let i = 0; i < localPts.length; i++) {
+          if (!localPts[i] || !sObj.simP[i] || !sObj.simQ[i] || !sObj.worldPts[i]) continue;
           sObj.simP[i].copy(localPts[i]).applyMatrix4(loopMesh.matrixWorld);
           sObj.simQ[i].copy(sObj.simP[i]); sObj.worldPts[i].copy(sObj.simP[i]);
         }
@@ -1095,12 +1148,14 @@ const finishStroke = (h) => {
       }
 
       const P = sObj.simP, Q = sObj.simQ, N = P.length, R = sObj.localPts;
+      if (N < 2 || R.length < N) return;
       const sub = isSoft ? 8 : 10, hStep = Math.min(dt, 0.03) / sub, grav = APP.worldG * hStep * hStep;
       const cA = new THREE.Vector3(), cB = new THREE.Vector3(), diff = new THREE.Vector3(), tmp = new THREE.Vector3(), hitP = new THREE.Vector3();
       const tank = APP.entities.find(e => e.type === "tank" && !e.dissolveStart);
 
       for (let s = 0; s < sub; s++) {
         for (let i = 0; i < N; i++) {
+          if (!P[i] || !Q[i]) continue;
           const damp = isSoft ? 0.991 : 0.996;
           const vx = (P[i].x - Q[i].x) * damp, vy = (P[i].y - Q[i].y) * damp, vz = (P[i].z - Q[i].z) * damp;
           Q[i].copy(P[i]); P[i].x += vx; P[i].y += vy + grav; P[i].z += vz;
@@ -1116,19 +1171,24 @@ const finishStroke = (h) => {
         // Hands + Laser Poke Interaction
         for (const hd of APP.hands) {
           if (hd.isDesk && !hd.act) continue;
-          const checks = [{ pos: hd.wp, r: 0.055, imp: hd.vel }, { pos: hd.tipWp, r: 0.024, imp: hd.vel }];
-          if (hd.act && hd.pokeHit && hd.pokeHit.ent === sObj.ent) {
+          const checks = [];
+          if (isValidPt(hd.wp)) checks.push({ pos: hd.wp, r: 0.055, imp: hd.vel });
+          if (isValidPt(hd.tipWp)) checks.push({ pos: hd.tipWp, r: 0.024, imp: hd.vel });
+          if (hd.act && hd.pokeHit && hd.pokeHit.ent === sObj.ent && isValidPt(hd.pokeHit.point) && hd.pokeHit.dir) {
             checks.push({ pos: hd.pokeHit.point, r: 0.095, imp: hd.pokeHit.dir.clone().multiplyScalar(2.6) });
           }
           for (const hs of checks) {
             const mD = sObj.radius + hs.r;
             for (let i = 0; i < N - 1; i++) {
+              if (!P[i] || !P[i + 1]) continue;
               const { dist, t: ts } = pointToSeg(hs.pos, P[i], P[i + 1], hitP);
               if (dist < mD && dist > 1e-6) {
                 diff.copy(hitP).sub(hs.pos).multiplyScalar((mD - dist) / dist);
                 const w0 = 1 - ts, w1 = ts, nm = w0 * w0 + w1 * w1 || 1;
                 P[i].addScaledVector(diff, w0 / nm); P[i + 1].addScaledVector(diff, w1 / nm);
-                P[i].addScaledVector(hs.imp, hStep * 0.45 * (w0 / nm)); P[i + 1].addScaledVector(hs.imp, hStep * 0.45 * (w1 / nm));
+                if (hs.imp) {
+                  P[i].addScaledVector(hs.imp, hStep * 0.45 * (w0 / nm)); P[i + 1].addScaledVector(hs.imp, hStep * 0.45 * (w1 / nm));
+                }
               }
             }
           }
@@ -1136,9 +1196,10 @@ const finishStroke = (h) => {
 
         // Collide with other drawn rigid/soft strokes
         for (const ot of drawnStrokes) {
-          if (ot === sObj || (ot.ent && ot.ent.dissolveStart)) continue;
+          if (ot === sObj || (ot.ent && ot.ent.dissolveStart) || !ot.worldPts) continue;
           const OP = ot.worldPts, mD = sObj.radius + ot.radius;
           for (let i = 0; i < N - 1; i++) for (let j = 0; j < OP.length - 1; j++) {
+            if (!P[i] || !P[i + 1] || !OP[j] || !OP[j + 1]) continue;
             const { s: ts } = closestSegSeg(P[i], P[i + 1], OP[j], OP[j + 1], cA, cB);
             diff.copy(cA).sub(cB); const d = diff.length();
             if (d < mD && d > 1e-6) {
@@ -1151,6 +1212,7 @@ const finishStroke = (h) => {
 
         // Scene floor, scanned walls & APP._phys.bodies collision
         for (let i = 0; i < N; i++) {
+          if (!P[i] || !Q[i]) continue;
           if (P[i].y < sObj.radius) {
             P[i].y = sObj.radius;
             Q[i].x += (P[i].x - Q[i].x) * 0.3; Q[i].z += (P[i].z - Q[i].z) * 0.3;
@@ -1161,34 +1223,37 @@ const finishStroke = (h) => {
         if (isSoft) {
           // Softbody segment-length & bend elasticity
           for (let i = 0; i < N - 1; i++) {
+            if (!P[i] || !P[i + 1]) continue;
             diff.subVectors(P[i + 1], P[i]);
             const d = diff.length() || 1e-6, corr = ((d - restSegLens[i]) / d) * 0.45;
             P[i].addScaledVector(diff, corr); P[i + 1].addScaledVector(diff, -corr);
           }
           for (let i = 0; i < N - 2; i++) {
+            if (!P[i] || !P[i + 2]) continue;
             diff.subVectors(P[i + 2], P[i]);
             const d = diff.length() || 1e-6, corr = ((d - restBendLens[i]) / d) * 0.18;
             P[i].addScaledVector(diff, corr); P[i + 2].addScaledVector(diff, -corr);
           }
         }
 
-        const curCom = new THREE.Vector3(); for (let i = 0; i < N; i++) curCom.add(P[i]); curCom.multiplyScalar(1 / N);
+        const curCom = new THREE.Vector3(); for (let i = 0; i < N; i++) if (P[i]) curCom.add(P[i]); curCom.multiplyScalar(1 / N);
         const A = [0, 0, 0, 0, 0, 0, 0, 0, 0];
         for (let i = 0; i < N; i++) {
+          if (!P[i] || !R[i]) continue;
           const px = P[i].x - curCom.x, py = P[i].y - curCom.y, pz = P[i].z - curCom.z, rx = R[i].x, ry = R[i].y, rz = R[i].z;
           A[0] += px * rx; A[1] += py * rx; A[2] += pz * rx; A[3] += px * ry; A[4] += py * ry; A[5] += pz * ry; A[6] += px * rz; A[7] += py * rz; A[8] += pz * rz;
         }
         extractRotation(A, sObj.q, 5);
         const shapeStiff = isSoft ? 0.08 : 0.92;
-        for (let i = 0; i < N; i++) { tmp.copy(R[i]).applyQuaternion(sObj.q).add(curCom); P[i].lerp(tmp, shapeStiff); }
+        for (let i = 0; i < N; i++) { if (!P[i] || !R[i]) continue; tmp.copy(R[i]).applyQuaternion(sObj.q).add(curCom); P[i].lerp(tmp, shapeStiff); }
         sObj.com.copy(curCom);
       }
 
-      if (isSoft) {
+      if (isSoft && sObj.mainMesh && sObj.mainMesh.geometry && sObj.mainMesh.geometry.attributes.position) {
         // Deform geometry vertices in-place in world-relative local coordinates (no rotation drift)
         loopMesh.position.copy(sObj.com);
         loopMesh.quaternion.identity();
-        for (let i = 0; i < N; i++) localTmp[i].copy(P[i]).sub(sObj.com);
+        for (let i = 0; i < N; i++) if (localTmp[i] && P[i]) localTmp[i].copy(P[i]).sub(sObj.com);
         const posAttr = sObj.mainMesh.geometry.attributes.position;
         if (sObj.isRibbon) writeFlatRibbonVerts(localTmp, sObj.radius * 1.45, sObj.viewNormal, posAttr.array);
         else writeWatertightTubeVerts(localTmp, sObj.isRope ? sObj.radius * 1.15 : sObj.radius, sObj.isRope ? 12 : 14, sObj.isRope, posAttr.array);
@@ -1200,6 +1265,7 @@ const finishStroke = (h) => {
           const { inst, bindings } = sObj.grassData;
           for (let i = 0; i < bindings.length; i++) {
             const b = bindings[i];
+            if (!localTmp[b.sIdx] || !localTmp[b.sIdx + 1]) continue;
             gDummy.position.copy(localTmp[b.sIdx]).lerp(localTmp[b.sIdx + 1], b.frac).add(b.off);
             gDummy.rotation.copy(b.rot);
             gDummy.scale.setScalar(b.sc);
@@ -1211,7 +1277,7 @@ const finishStroke = (h) => {
       } else {
         loopMesh.position.copy(sObj.com); loopMesh.quaternion.copy(sObj.q);
       }
-      for (let i = 0; i < N; i++) sObj.worldPts[i].copy(P[i]);
+      for (let i = 0; i < N; i++) if (sObj.worldPts[i] && P[i]) sObj.worldPts[i].copy(P[i]);
     },
     dispose: () => { const ix = drawnStrokes.indexOf(sObj); if (ix >= 0) drawnStrokes.splice(ix, 1); }
   });
@@ -1316,19 +1382,15 @@ plateBg.position.z = -0.004;
 tbGroup.add(plateBg);
 
 const plateRim = new THREE.LineLoop(
-  new THREE.BufferGeometry().setFromPoints(new THREE.Path(mkRoundedPlateGeo(PALM_W + 0.006, PALM_H + 0.006, 0.02).parameters ? [] : [])),
+  new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-(PALM_W * 0.5 + 0.002), -(PALM_H * 0.5 + 0.002), 0),
+    new THREE.Vector3(PALM_W * 0.5 + 0.002, -(PALM_H * 0.5 + 0.002), 0),
+    new THREE.Vector3(PALM_W * 0.5 + 0.002, PALM_H * 0.5 + 0.002, 0),
+    new THREE.Vector3(-(PALM_W * 0.5 + 0.002), PALM_H * 0.5 + 0.002, 0)
+  ]),
   new THREE.LineBasicMaterial({ color: 0x00ff99, transparent: true, opacity: 0.7 })
 );
-// Clean glowing border outline
-{
-  const hw = PALM_W * 0.5 + 0.002, hh = PALM_H * 0.5 + 0.002;
-  plateRim.geometry.dispose();
-  plateRim.geometry = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(-hw, -hh, 0), new THREE.Vector3(hw, -hh, 0),
-    new THREE.Vector3(hw, hh, 0), new THREE.Vector3(-hw, hh, 0)
-  ]);
-  tbGroup.add(plateRim);
-}
+tbGroup.add(plateRim);
 
 const headerCanvas = document.createElement("canvas"); headerCanvas.width = 512; headerCanvas.height = 56;
 const headerCtx = headerCanvas.getContext("2d");
@@ -1530,7 +1592,7 @@ APP._toggleBrushToolbar = (force) => {
 
 // Raycast interaction for controller trigger & desktop mouse on Palm Toolbar & 2D Board
 const hitPalmToolbarRay = (ray) => {
-  if (!tbGroup.visible || tbScale < 0.2) return false;
+  if (!tbGroup.visible || tbScale < 0.2 || !ray) return false;
   const hit = ray.intersectObjects(palmButtons.map(b => b.mesh), false)[0];
   if (hit && hit.distance < 3.0 && hit.object.userData.palmBtn) {
     APP.sfx.play("click");
@@ -1541,7 +1603,7 @@ const hitPalmToolbarRay = (ray) => {
 };
 
 const hitBoardRay = (ray, inputKey, isTap) => {
-  if (!currentBoard || currentBoard.dissolveStart || !currentBoard.boardData) return false;
+  if (!ray || !currentBoard || currentBoard.dissolveStart || !currentBoard.boardData) return false;
   const bd = currentBoard.boardData;
   if (isTap) {
     const bHit = ray.intersectObjects(bd.frameButtons.map(f => f.mesh), false)[0];
@@ -1572,7 +1634,7 @@ APP._penCleanup.push(APP.on("selectend", h => triggerHeld.delete(h)));
 APP._penCleanup.push(APP.on("pinchstart", h => {
   triggerHeld.add(h);
   if (h.isDesk) return;
-  if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData) {
+  if (currentBoard && !currentBoard.dissolveStart && currentBoard.boardData && isValidPt(h.tipWp)) {
     const bd = currentBoard.boardData;
     for (const fb of bd.frameButtons) {
       const wp = fb.mesh.getWorldPosition(tbTmpW);
@@ -1634,15 +1696,17 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
     for (const h of APP.hands) {
       if (h === leftHand && palmOpenState) continue;
       if (!h.isDesk) {
-        const loc = tbGroup.worldToLocal(h.tipWp.clone());
-        if (Math.abs(loc.z) < 0.055) {
-          for (const b of palmButtons) {
-            if (Math.abs(loc.x - b.x) <= b.w * 0.52 && Math.abs(loc.y - b.y) <= b.h * 0.52) {
-              b.hovered = true;
-              if (Math.abs(loc.z) < 0.024 && now - lastTbTapAt > 0.45) {
-                lastTbTapAt = now;
-                APP.sfx.play("click");
-                b.onTap();
+        if (isValidPt(h.tipWp)) {
+          const loc = tbGroup.worldToLocal(h.tipWp.clone());
+          if (Math.abs(loc.z) < 0.055) {
+            for (const b of palmButtons) {
+              if (Math.abs(loc.x - b.x) <= b.w * 0.52 && Math.abs(loc.y - b.y) <= b.h * 0.52) {
+                b.hovered = true;
+                if (Math.abs(loc.z) < 0.024 && now - lastTbTapAt > 0.45) {
+                  lastTbTapAt = now;
+                  APP.sfx.play("click");
+                  b.onTap();
+                }
               }
             }
           }
@@ -1680,9 +1744,9 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
 
   // 4. Pen Drawing (either flat onto 2D Board or 3D Stroke)
   for (const h of APP.hands) {
-    const activePen = (h.held && h.held.type === "pen" && !h.held.dissolveStart && h.held.root.parent)
+    const activePen = (h.held && h.held.type === "pen" && !h.held.dissolveStart && h.held.root && h.held.root.parent)
       ? h.held
-      : (currentPen && !currentPen.dissolveStart && currentPen.heldBy === h ? currentPen : null);
+      : (currentPen && !currentPen.dissolveStart && currentPen.heldBy === h && currentPen.root && currentPen.root.parent ? currentPen : null);
     if (activePen && currentPen !== activePen) currentPen = activePen;
 
     const triggerActive = !!(h.act || triggerHeld.has(h) || (h.isDesk && APP.pointer.down));
@@ -1693,7 +1757,9 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
     }
 
     activePen.root.updateMatrixWorld(true);
-    const tip = activePen.tipLocal.clone().applyMatrix4(activePen.root.matrixWorld);
+    const tipLocal = isValidPt(activePen.tipLocal) ? activePen.tipLocal : new THREE.Vector3(0, 0, -0.106);
+    const tip = tipLocal.clone().applyMatrix4(activePen.root.matrixWorld);
+    if (!isValidPt(tip)) continue;
 
     // If holding pen near the 2D board (and no 3D physics mode active), write cleanly onto the 2D board!
     let wroteOnBoard = false;
@@ -1729,6 +1795,7 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
         drawTip.copy(loc).applyMatrix4(currentBoard.root.matrixWorld);
       }
     }
+    if (!isValidPt(drawTip)) continue;
 
     let st = activeStrokes.get(h);
     if (!st) {
@@ -1755,7 +1822,8 @@ APP.onTick("mod_pen_and_chains", 0, (dt, t) => {
       continue;
     }
 
-    if (st.pts[st.pts.length - 1].distanceTo(drawTip) >= 0.008) {
+    const lastPt = st.pts && st.pts.length ? st.pts[st.pts.length - 1] : null;
+    if (!isValidPt(lastPt) || lastPt.distanceTo(drawTip) >= 0.008) {
       st.pts.push(drawTip);
       if (st.dotMesh) { APP.scene.remove(st.dotMesh); st.dotMesh.geometry.dispose(); st.dotMesh = null; }
       if (st.mesh) { APP.scene.remove(st.mesh); st.mesh.geometry.dispose(); }
