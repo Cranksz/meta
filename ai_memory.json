@@ -29,7 +29,8 @@
   ],
   "learnedRules": [
     "Always make sure new pen objects are initialized with active drawing capabilities.",
-    "Ensure the 'delete all' command permanently removes all active entities from the simulation without them reappearing."
+    "Ensure the 'delete all' command permanently removes all active entities from the simulation without them reappearing.",
+    "Always ensure new pen objects are initialized with active drawing capabilities."
   ],
   "userPreferences": {
     "objects": {
@@ -121,7 +122,7 @@
       "evidenceCount": 3,
       "summary": "ink not appearing",
       "confidence": 1,
-      "autoApplied": false,
+      "autoApplied": true,
       "updatedAt": "2026-11-25T00:02:49.282Z"
     },
     {
