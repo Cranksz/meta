@@ -1,0 +1,379 @@
+@ability: ai_studio_module
+@autorun
+@code:
+const { $, say, sfx, loadedTxtFiles, splitAbilityBlocks, parseAbilitiesTxt, getMergedAbilitiesText, saveFilesCache, fetchAllTxtFromUrl } = APP;
+const ai = APP.ai, aiState = ai.state;
+
+const DEFAULT_AI_MEMORY = {
+  project: 'Say It, See It (Modular WebXR + Three.js r147)',
+  priorityOrder: ['craft_3d.txt', 'ai_models.txt', 'toolbar_ui.txt', 'ai_studio.txt', 'bot_brain.txt', 'voice_stt.txt', 'core_abilities.txt', 'abilities.txt', 'interaction.txt', 'physics.txt', 'drawing.txt', 'models.txt', 'bot.txt'],
+  conventions: [
+    'Use APP.THREE instead of global THREE inside @ability and procedural blocks.',
+    'Always build photorealistic multi-part 3D models using APP.craft (lathe, tube, organicSphere, bevelBox, waterJet, mat).',
+    'Always combine AI creativity with repository instructions (interaction.txt, physics.txt, bot.txt, models.txt).',
+    'Set instancedMesh.userData.skipMatrixShader = true on InstancedMesh objects.',
+    'Support live HTML/DOM/CSS edits when requested from the prompt tape or AI Studio.'
+  ],
+  learnedRules: [],
+  userPreferences: { objects: {}, effects: {}, physics: {}, interactions: {} },
+  recurringPatterns: [],
+  recentFeedbackLog: [],
+  toolbar: { customButtons: [], hiddenIds: [], renamed: {} },
+  botAppearance: null
+};
+
+function b64ToUtf8(b64) {
+  const bin = atob((b64 || '').replace(/\s+/g, '')), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+function utf8ToB64(str) {
+  const bytes = new TextEncoder().encode(str); let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function mergeMemoryObjects(base, incoming) {
+  const out = structuredClone(base); if (!incoming || typeof incoming !== 'object') return out;
+  if (Array.isArray(incoming.learnedRules)) out.learnedRules = [...new Set([...(out.learnedRules || []), ...incoming.learnedRules])].slice(-60);
+  if (incoming.userPreferences) for (const cat of ['objects', 'effects', 'physics', 'interactions']) out.userPreferences[cat] = { ...(out.userPreferences[cat] || {}), ...(incoming.userPreferences[cat] || {}) };
+  if (Array.isArray(incoming.recurringPatterns)) { const byK = new Map(); for (const p of [...(out.recurringPatterns || []), ...incoming.recurringPatterns]) if (p?.key) byK.set(p.key, p); out.recurringPatterns = [...byK.values()].slice(-40); }
+  if (Array.isArray(incoming.recentFeedbackLog)) out.recentFeedbackLog = incoming.recentFeedbackLog.slice(-40);
+  if (incoming.toolbar) out.toolbar = { customButtons: incoming.toolbar.customButtons || out.toolbar?.customButtons || [], hiddenIds: incoming.toolbar.hiddenIds || out.toolbar?.hiddenIds || [], renamed: { ...(out.toolbar?.renamed || {}), ...(incoming.toolbar.renamed || {}) } };
+  if (incoming.botAppearance) out.botAppearance = { ...(out.botAppearance || {}), ...incoming.botAppearance };
+  return out;
+}
+
+function getRepoTarget() {
+  const u = ($('txtUrl')?.value || '').trim(), m = u.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  return { owner: m ? m[1] : 'Cranksz', repo: m ? m[2] : 'meta', branch: ($('aiBranch')?.value || 'main').trim() || 'main' };
+}
+async function ghFetchDirect(path, opts = {}) {
+  ai.saveCreds();
+  if (!aiState.githubToken) throw new Error('أدخل GitHub Token أولاً في الإعدادات (⚙️)');
+  const { owner, repo } = getRepoTarget();
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+    ...opts, headers: { 'Authorization': 'Bearer ' + aiState.githubToken, 'Accept': 'application/vnd.github+json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) }
+  });
+  const txt = await res.text(); let data = {}; try { data = txt ? JSON.parse(txt) : {}; } catch { data = { raw: txt }; }
+  if (!res.ok) throw new Error(`GitHub ${res.status}: ${data.message || txt.slice(0, 180)}`);
+  return data;
+}
+async function ensureValidBranch() {
+  try {
+    const info = await ghFetchDirect('');
+    if (info?.default_branch) { aiState.branch = info.default_branch; if ($('aiBranch')) $('aiBranch').value = aiState.branch; localStorage.setItem('ai_github_branch', aiState.branch); return aiState.branch; }
+  } catch {}
+  return getRepoTarget().branch;
+}
+async function getGitHubSnapshot() {
+  let { branch } = getRepoTarget(), items;
+  try { items = await ghFetchDirect(`/contents?ref=${encodeURIComponent(branch)}&t=${Date.now()}`); }
+  catch (err) { if (/404/.test(err.message)) { branch = await ensureValidBranch(); items = await ghFetchDirect(`/contents?ref=${encodeURIComponent(branch)}&t=${Date.now()}`); } else throw err; }
+  const filesMap = {}, targets = (Array.isArray(items) ? items : []).filter(it => it.type === 'file' && /\.(txt|html?|json|js|css|md)$/i.test(it.name));
+  await Promise.all(targets.map(async it => {
+    const f = await ghFetchDirect(`/contents/${encodeURIComponent(it.name)}?ref=${encodeURIComponent(branch)}&t=${Date.now()}`);
+    filesMap[it.name] = { sha: f.sha, content: b64ToUtf8(f.content) };
+  }));
+  return filesMap;
+}
+async function commitDirectToGitHub(filesToWrite, commitMessage, filesToDelete = []) {
+  let { branch } = getRepoTarget(), ref;
+  try { ref = await ghFetchDirect(`/git/ref/heads/${encodeURIComponent(branch)}?t=${Date.now()}`); }
+  catch (err) { if (/404/.test(err.message)) { branch = await ensureValidBranch(); ref = await ghFetchDirect(`/git/ref/heads/${encodeURIComponent(branch)}?t=${Date.now()}`); } else throw err; }
+  const headSha = ref.object.sha, headCommit = await ghFetchDirect(`/git/commits/${headSha}`), treeEntries = [];
+  for (const f of filesToWrite) {
+    const blob = await ghFetchDirect(`/git/blobs`, { method: 'POST', body: JSON.stringify({ content: utf8ToB64(f.content), encoding: 'base64' }) });
+    treeEntries.push({ path: f.path, mode: '100644', type: 'blob', sha: blob.sha });
+  }
+  for (const delPath of filesToDelete) treeEntries.push({ path: delPath, mode: '100644', type: 'blob', sha: null });
+  const newTree = await ghFetchDirect(`/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: headCommit.tree.sha, tree: treeEntries }) });
+  const newCommit = await ghFetchDirect(`/git/commits`, { method: 'POST', body: JSON.stringify({ message: commitMessage || 'AI Update', tree: newTree.sha, parents: [headSha] }) });
+  await ghFetchDirect(`/git/refs/heads/${encodeURIComponent(branch)}`, { method: 'PATCH', body: JSON.stringify({ sha: newCommit.sha, force: false }) });
+  return { sha: newCommit.sha, branch };
+}
+
+function applyAbilityEdit(fileText, edit) {
+  if (edit.action === 'replace_file' || edit.action === 'create_file') return edit.fullContent ?? '';
+  if (edit.action === 'patch_html' || edit.action === 'patch_file') {
+    if (!edit.search || !fileText.includes(edit.search)) throw new Error('لم أجد المقطع المطلوب تعديله في ' + edit.file);
+    return fileText.replace(edit.search, edit.replace ?? '');
+  }
+  const { preamble, blocks } = splitAbilityBlocks(fileText), targetId = String(edit.abilityId || '').trim().toLowerCase();
+  if (edit.action === 'delete_ability') {
+    const filtered = blocks.filter(b => b.id.toLowerCase() !== targetId);
+    return [preamble, ...filtered.map(b => b.lines.join('\n').trim())].filter(Boolean).join('\n\n') + '\n';
+  }
+  if (edit.action === 'upsert_ability') {
+    const incoming = splitAbilityBlocks(edit.abilityBlock || '');
+    if (!incoming.blocks.length) {
+      const newLines = String(edit.abilityBlock || '').replace(/\r\n/g, '\n').trim().split('\n');
+      const idx = blocks.findIndex(b => b.id.toLowerCase() === targetId);
+      if (idx >= 0) blocks[idx].lines = newLines; else blocks.push({ id: edit.abilityId || 'ab_new', lines: newLines });
+    } else {
+      for (const nb of incoming.blocks) {
+        const key = (nb.id || edit.abilityId || '').trim().toLowerCase(), idx = blocks.findIndex(b => b.id.toLowerCase() === key);
+        if (idx >= 0) blocks[idx] = nb; else blocks.push(nb);
+      }
+    }
+    return [preamble, ...blocks.map(b => b.lines.join('\n').trim())].filter(Boolean).join('\n\n') + '\n';
+  }
+  throw new Error('عملية تعديل غير معروفة: ' + edit.action);
+}
+
+function parseAiTeacherOutput(rawText) {
+  const txt = String(rawText || '').trim();
+  if (/<<<(?:REPLY|EDIT|META|DOM_PATCH)>>>/i.test(txt) || /<<<EDIT\s+/i.test(txt)) {
+    const replyM = txt.match(/<<<REPLY>>>([\s\S]*?)<<<END_REPLY>>>/i);
+    const metaM = txt.match(/<<<META>>>([\s\S]*?)<<<END_META>>>/i);
+    const domM = txt.match(/<<<DOM_PATCH>>>([\s\S]*?)<<<END_DOM_PATCH>>>/i);
+    let meta = {}; if (metaM) { try { meta = ai.parseJsonSafe(metaM[1]); } catch {} }
+    const edits = [], editRe = /<<<EDIT\s+([^>]+)>>>([\s\S]*?)<<<END_EDIT>>>/gi;
+    let m;
+    while ((m = editRe.exec(txt)) !== null) {
+      const hdr = m[1], body = m[2].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      const attr = k => { const am = hdr.match(new RegExp(k + '\\s*=\\s*["\']([^"\']+)["\']', 'i')); return am ? am[1].trim() : ''; };
+      const file = attr('file').replace(/^\.\//, ''), action = attr('action') || 'upsert_ability';
+      let abilityId = attr('abilityId');
+      if (action === 'patch_html' || action === 'patch_file') {
+        const sM = body.match(/<<<SEARCH>>>\r?\n?([\s\S]*?)\r?\n?<<<END_SEARCH>>>/i);
+        const rM = body.match(/<<<REPLACE>>>\r?\n?([\s\S]*?)\r?\n?<<<END_REPLACE>>>/i);
+        edits.push({ file, action, search: sM ? sM[1] : '', replace: rM ? rM[1] : '' });
+      } else if (action === 'upsert_ability') {
+        if (!abilityId) { const idM = body.match(/^@ability\s*:\s*(\S+)/im); if (idM) abilityId = idM[1].trim(); }
+        edits.push({ file, action, abilityId, abilityBlock: body });
+      } else if (action === 'delete_ability') {
+        edits.push({ file, action, abilityId });
+      } else {
+        edits.push({ file, action, fullContent: body });
+      }
+    }
+    return { reply: (replyM ? replyM[1].trim() : '') || (edits.length ? 'تم تجهيز التعديل بنجاح.' : txt.slice(0, 600)), edits, domPatch: domM ? domM[1].trim() : '', testCommands: Array.isArray(meta.testCommands) ? meta.testCommands : [], commitMessage: meta.commitMessage || '', learnedRule: meta.learnedRule || '' };
+  }
+  return ai.parseJsonSafe(txt);
+}
+
+function buildTeacherSystemPrompt(memory) {
+  return `You are the autonomous AI Lead Engineer for "Say It, See It" (Modular WebXR Three.js r147).
+PROJECT MEMORY & CONVENTIONS: ${JSON.stringify(memory, null, 2)}
+RULES:
+- Use action="upsert_ability" or "delete_ability" for .txt ability edits (including ai_models.txt, craft_3d.txt, etc.), action="patch_html" (<<<SEARCH>>> / <<<REPLACE>>>) for Say-It-See-It.html edits, action="create_file" / "replace_file" for full files.
+- When editing HTML UI/CSS/DOM, ALSO output <<<DOM_PATCH>>> ...JS code operating on document/APP so the change applies IMMEDIATELY in the live browser! <<<END_DOM_PATCH>>>
+- Use APP.THREE inside @ability blocks.
+- Output ONLY raw tags:
+
+<<<REPLY>>>
+Concise explanation in user's language.
+<<<END_REPLY>>>
+
+<<<META>>>
+{"commitMessage":"Short commit title","learnedRule":"","testCommands":[]}
+<<<END_META>>>
+
+<<<DOM_PATCH>>>
+// Optional instant live DOM/CSS JS snippet
+<<<END_DOM_PATCH>>>
+
+<<<EDIT file="Say-It-See-It.html" action="patch_html">>>
+<<<SEARCH>>>
+exact snippet from HTML
+<<<END_SEARCH>>>
+<<<REPLACE>>>
+replacement snippet
+<<<END_REPLACE>>>
+<<<END_EDIT>>>`;
+}
+
+async function getWorkingRepoFiles(includeHtml = false) {
+  let snap = null;
+  if (aiState.githubToken) { try { snap = await getGitHubSnapshot(); } catch {} }
+  const workingFiles = {};
+  if (snap) for (const [k, v] of Object.entries(snap)) workingFiles[k] = v.content;
+  for (const [k, v] of loadedTxtFiles) if (workingFiles[k] === undefined) workingFiles[k] = v;
+  if (aiState.sandboxActive) for (const [k, v] of loadedTxtFiles) if (/\.txt$/i.test(k)) workingFiles[k] = v;
+  if (includeHtml) {
+    const htmlKey = Object.keys(workingFiles).find(k => /\.html?$/i.test(k)) || aiState.latestHtmlFilename || 'Say-It-See-It.html';
+    if (!workingFiles[htmlKey]) workingFiles[htmlKey] = aiState.latestEditedHtml || ('<!DOCTYPE html>\n' + document.documentElement.outerHTML);
+    aiState.latestHtmlFilename = htmlKey;
+  }
+  return workingFiles;
+}
+
+async function refreshGitHubCommits() {
+  try {
+    let { branch } = getRepoTarget(), commits;
+    try { commits = await ghFetchDirect(`/commits?sha=${encodeURIComponent(branch)}&per_page=10&t=${Date.now()}`); }
+    catch (err) { if (/404/.test(err.message)) { branch = await ensureValidBranch(); commits = await ghFetchDirect(`/commits?sha=${encodeURIComponent(branch)}&per_page=10&t=${Date.now()}`); } else throw err; }
+    const sel = $('aiCommitSelect'); if (!sel) return;
+    sel.innerHTML = '<option value="">📜 آخر التعديلات على GitHub...</option>';
+    for (const c of commits) { const opt = document.createElement('option'); opt.value = c.sha; opt.textContent = `${c.sha.slice(0, 7)} — ${(c.commit?.message || '').split('\n')[0].slice(0, 42)}`; sel.appendChild(opt); }
+    if ($('aiRevertCommitBtn')) $('aiRevertCommitBtn').disabled = true;
+  } catch (e) { if ($('aiConnInfo')) $('aiConnInfo').textContent = '⚠️ ' + e.message; }
+}
+
+function renderAiPlan(plan) {
+  aiState.pendingPlan = plan; const edits = plan.edits || [];
+  if (!edits.length) { $('aiActionRow').style.display = 'none'; $('aiTestChips').style.display = 'none'; $('aiDiff').style.display = 'none'; return; }
+  $('aiDiff').textContent = edits.map(ed => `--- ${ed.file} (${ed.action}${ed.abilityId ? ': ' + ed.abilityId : ''}) ---\n` + (ed.isHtml ? '[تعديل HTML]\n' : '') + ed.after.slice(0, 4500)).join('\n\n');
+  const chips = $('aiTestChips'); chips.innerHTML = '';
+  if (plan.testCommands?.length) {
+    chips.style.display = 'flex';
+    for (const cmd of plan.testCommands) { const btn = document.createElement('button'); btn.textContent = '▶ ' + cmd; btn.onclick = () => APP.matchAndRun(cmd); chips.appendChild(btn); }
+  } else chips.style.display = 'none';
+  $('aiActionRow').style.display = 'flex';
+  $('aiTestLiveBtn').style.display = edits.some(e => !e.isHtml) ? 'inline-block' : 'none';
+  if (edits.some(e => e.isHtml) && $('aiDownloadHtmlBtn')) $('aiDownloadHtmlBtn').style.display = 'inline-block';
+}
+
+function testPlanInLiveSandbox() {
+  const plan = aiState.pendingPlan; if (!plan?.updatedFiles) return;
+  if (!aiState.sandboxActive) aiState.rollbackSnapshot = new Map(loadedTxtFiles);
+  let appliedCount = 0;
+  for (const [fname, content] of Object.entries(plan.updatedFiles)) if (/\.txt$/i.test(fname)) { loadedTxtFiles.set(fname, content); appliedCount++; }
+  if (appliedCount > 0) {
+    const errs = parseAbilitiesTxt(getMergedAbilitiesText());
+    aiState.sandboxActive = true; $('aiRollbackBtn').style.display = 'inline-block'; $('aiSandboxBadge').style.display = 'inline-block'; $('aiSandboxBadge').classList.add('sandbox');
+    if (errs.length) ai.appendLog('⚠️ خطأ أثناء التجربة الحية:\n' + errs.join('\n'), 'err');
+    else ai.appendLog(`🧪 تم تشغيل التعديل مؤقتاً (${appliedCount} ملف). اضغط "موافقة وحفظ في GitHub" أو "تراجع".`, 'bot');
+  }
+}
+
+function rollbackSandbox() {
+  if (!aiState.rollbackSnapshot) return;
+  loadedTxtFiles.clear(); for (const [k, v] of aiState.rollbackSnapshot) loadedTxtFiles.set(k, v);
+  parseAbilitiesTxt(getMergedAbilitiesText()); aiState.sandboxActive = false; aiState.rollbackSnapshot = null;
+  $('aiRollbackBtn').style.display = 'none'; $('aiSandboxBadge').style.display = 'none';
+  ai.appendLog('↩️ تم التراجع واستعادة الكود السابق.', 'bot');
+}
+
+async function editHtmlOrRepoFromPrompt(rawMsg, opts = {}) {
+  const msg = (rawMsg || $('aiInput')?.value || '').trim(); if (!msg) return { ok: false };
+  if (!opts.fromMainTape && $('aiInput')) $('aiInput').value = '';
+  ai.appendLog(msg, 'user'); aiState.chatHistory.push({ role: 'user', content: msg });
+  if ($('aiSendBtn')) { $('aiSendBtn').disabled = true; $('aiSendBtn').textContent = '⏳...'; }
+  if (opts.fromMainTape) say('🛠️ جاري تعديل الـ HTML والواجهة...');
+  try {
+    const isHtmlEdit = Boolean(opts.forceHtml) || /\b(html|ui|css|dom|style|button|page|header|footer|toolbar|color|font)\b|صفحة|الواجهه|الواجهة|زر\s+في|لون\s+الشريط|الـ\s*html/i.test(msg);
+    const workingFiles = await getWorkingRepoFiles(isHtmlEdit);
+    let memory = structuredClone(APP.liveCompanion ? APP.liveCompanion.memory : DEFAULT_AI_MEMORY);
+    if (workingFiles['ai_memory.json']) { try { memory = mergeMemoryObjects(memory, ai.parseJsonSafe(workingFiles['ai_memory.json'])); } catch {} }
+
+    const txtContext = Object.entries(workingFiles).filter(([k]) => /\.txt$/i.test(k)).map(([k, v]) => `=== FILE: ${k} ===\n${v}`).join('\n\n');
+    const htmlName = Object.keys(workingFiles).find(k => /\.html?$/i.test(k)) || 'Say-It-See-It.html';
+    const htmlSource = workingFiles[htmlName] || '';
+    const htmlContext = isHtmlEdit ? `\n=== FILE: ${htmlName} (Head + UI + Styles) ===\n${htmlSource.slice(0, 14000)}\n...\n${htmlSource.slice(-5000)}` : '';
+    const errs = $('aiAutoErr')?.checked ? window.__recentRuntimeErrors : [];
+    const userPrompt = [`USER INSTRUCTION:\n${msg}`, errs.length ? `RUNTIME ERRORS:\n${JSON.stringify(errs, null, 2)}` : '', `CURRENT .TXT FILES:\n${txtContext}`, htmlContext].filter(Boolean).join('\n\n');
+
+    const { text, modelUsed } = await ai.callAnyProviderRaw(buildTeacherSystemPrompt(memory), userPrompt, $('aiModel')?.value);
+    const parsed = parseAiTeacherOutput(text);
+
+    if (parsed.domPatch) {
+      try { await (new Function('APP', 'document', 'window', `return (async () => {\n${parsed.domPatch}\n})();`)(APP, document, window)); sfx.play('magic'); }
+      catch (domErr) { ai.appendLog('⚠️ DOM live patch warning: ' + domErr.message, 'err'); }
+    }
+
+    const updatedFiles = {}, appliedEdits = [];
+    for (const ed of (parsed.edits || [])) {
+      const fname = String(ed.file || '').replace(/^\.\//, '').trim(); if (!fname) continue;
+      const prevText = updatedFiles[fname] !== undefined ? updatedFiles[fname] : (workingFiles[fname] || '');
+      try {
+        const nextText = applyAbilityEdit(prevText, { ...ed, file: fname });
+        updatedFiles[fname] = nextText;
+        appliedEdits.push({ file: fname, action: ed.action, abilityId: ed.abilityId || null, before: prevText, after: nextText, isHtml: /\.html?$/i.test(fname) });
+        if (/\.html?$/i.test(fname)) { aiState.latestEditedHtml = nextText; aiState.latestHtmlFilename = fname; }
+      } catch (patchErr) { ai.appendLog(`⚠️ ${fname}: ${patchErr.message}`, 'err'); }
+    }
+
+    const plan = { modelUsed, reply: parsed.reply || 'تم!', edits: appliedEdits, updatedFiles, testCommands: parsed.testCommands || [], commitMessage: parsed.commitMessage || `AI: ${msg.slice(0, 48)}`, learnedRule: parsed.learnedRule || '' };
+    aiState.chatHistory.push({ role: 'assistant', content: plan.reply });
+    ai.appendLog(`[${modelUsed}]\n${plan.reply}`, 'bot');
+    renderAiPlan(plan);
+    if (appliedEdits.some(e => !e.isHtml)) testPlanInLiveSandbox();
+
+    if (aiState.githubToken && appliedEdits.length && opts.autoCommitIfToken) {
+      await $('aiApproveBtn').onclick();
+    } else if (appliedEdits.some(e => e.isHtml)) {
+      $('aiPanel').classList.add('open');
+      say(`✅ تم تعديل HTML! (${parsed.domPatch ? 'طُبّق مباشرة' : 'جاهز للحفظ/التنزيل'})`);
+    } else if (parsed.domPatch) {
+      say('✅ تم تطبيق التعديل على الواجهة فوراً!');
+    }
+    return { ok: true, plan, modelUsed };
+  } catch (e) {
+    ai.appendLog('❌ ' + e.message, 'err'); say('❌ ' + e.message);
+    return { ok: false, error: e.message };
+  } finally {
+    if ($('aiSendBtn')) { $('aiSendBtn').disabled = false; $('aiSendBtn').textContent = 'تعديل'; }
+  }
+}
+
+if (!window.__aiStudioBound) {
+  window.__aiStudioBound = true;
+  $('aiOpenBtn').onclick = () => $('aiPanel').classList.toggle('open');
+  $('aiCloseBtn').onclick = () => $('aiPanel').classList.remove('open');
+  $('aiSettingsToggle').onclick = () => { const b = $('aiSettingsBox'); b.style.display = b.style.display === 'none' ? 'flex' : 'none'; };
+  $('aiToggleDiffBtn').onclick = () => { const d = $('aiDiff'); d.style.display = d.style.display === 'none' ? 'block' : 'none'; };
+  $('aiSendBtn').onclick = () => editHtmlOrRepoFromPrompt();
+  $('aiInput').addEventListener('keydown', e => { if (e.key === 'Enter') editHtmlOrRepoFromPrompt(); });
+  $('aiTestLiveBtn').onclick = testPlanInLiveSandbox;
+  $('aiRollbackBtn').onclick = rollbackSandbox;
+  $('aiDownloadHtmlBtn').onclick = () => {
+    const html = aiState.latestEditedHtml || ('<!DOCTYPE html>\n' + document.documentElement.outerHTML);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    a.download = aiState.latestHtmlFilename || 'Say-It-See-It.html'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  };
+  $('aiConnectBtn').onclick = async () => {
+    try {
+      ai.saveCreds(); const { owner, repo } = getRepoTarget(); $('aiConnInfo').textContent = '⏳ جاري التحقق من GitHub...';
+      const repoInfo = await ghFetchDirect('');
+      if (repoInfo?.default_branch && !$('aiBranch').value.trim()) { aiState.branch = repoInfo.default_branch; $('aiBranch').value = aiState.branch; localStorage.setItem('ai_github_branch', aiState.branch); }
+      $('aiConnInfo').textContent = `✅ متصل بـ ${owner}/${repo} (${aiState.branch}) | تعديل: ${repoInfo.permissions?.push ? 'نعم' : 'لا'}`;
+      $('aiSettingsBox').style.display = 'none'; await refreshGitHubCommits();
+      if (APP.liveCompanion) await APP.liveCompanion.pullMemoryFromGitHub();
+    } catch (e) { $('aiConnInfo').textContent = '❌ ' + e.message; }
+  };
+  $('aiApproveBtn').onclick = async () => {
+    const plan = aiState.pendingPlan; if (!plan?.updatedFiles) return;
+    const files = Object.entries(plan.updatedFiles).map(([path, content]) => ({ path, content })); if (!files.length) return;
+    if (!aiState.githubToken) { $('aiSettingsBox').style.display = 'flex'; ai.appendLog('ℹ️ أضف GitHub Token أو نزّل الملف من "💾 تنزيل HTML".', 'bot'); return; }
+    $('aiApproveBtn').disabled = true; $('aiApproveBtn').textContent = '⏳ جاري الحفظ...';
+    try {
+      const snap = await getGitHubSnapshot();
+      let memory = structuredClone(APP.liveCompanion ? APP.liveCompanion.memory : DEFAULT_AI_MEMORY);
+      if (snap['ai_memory.json']) { try { memory = mergeMemoryObjects(memory, ai.parseJsonSafe(snap['ai_memory.json'].content)); } catch {} }
+      if (plan.learnedRule?.trim()) { memory.learnedRules = memory.learnedRules || []; if (!memory.learnedRules.includes(plan.learnedRule.trim())) memory.learnedRules.push(plan.learnedRule.trim()); }
+      if (!snap['ai_memory.json'] || plan.learnedRule?.trim()) files.push({ path: 'ai_memory.json', content: JSON.stringify(memory, null, 2) + '\n' });
+      const res = await commitDirectToGitHub(files, plan.commitMessage || 'AI Studio update');
+      for (const f of files) if (/\.txt$/i.test(f.path)) loadedTxtFiles.set(f.path, f.content);
+      saveFilesCache(); if (APP.liveCompanion) APP.liveCompanion.setMemory(memory);
+      aiState.sandboxActive = false; aiState.rollbackSnapshot = null; aiState.pendingPlan = null;
+      $('aiRollbackBtn').style.display = 'none'; $('aiSandboxBadge').style.display = 'none'; $('aiActionRow').style.display = 'none';
+      window.__recentRuntimeErrors = []; $('aiErrCount').textContent = '0';
+      ai.appendLog(`✅ تم الحفظ في GitHub! (${res.sha.slice(0, 7)})`, 'bot'); say(`✅ تم الحفظ على GitHub (${res.sha.slice(0, 7)})`);
+      await refreshGitHubCommits();
+    } catch (e) { ai.appendLog('❌ فشل الحفظ في GitHub: ' + e.message, 'err'); }
+    finally { $('aiApproveBtn').disabled = false; $('aiApproveBtn').textContent = '✅ موافقة وحفظ في GitHub'; }
+  };
+  $('aiCommitSelect').onchange = () => { $('aiRevertCommitBtn').disabled = !$('aiCommitSelect').value; };
+  $('aiRefreshCommitsBtn').onclick = refreshGitHubCommits;
+  $('aiRevertCommitBtn').onclick = async () => {
+    const sha = $('aiCommitSelect').value; if (!sha) return;
+    try {
+      $('aiRevertCommitBtn').disabled = true; const { branch } = getRepoTarget();
+      const targetCommit = await ghFetchDirect(`/commits/${encodeURIComponent(sha)}`);
+      const parentSha = targetCommit.parents?.[0]?.sha; if (!parentSha) throw new Error('لا يمكن استرجاع أول التزام');
+      const parentCommit = await ghFetchDirect(`/commits/${encodeURIComponent(parentSha)}`);
+      const ref = await ghFetchDirect(`/git/ref/heads/${encodeURIComponent(branch)}?t=${Date.now()}`);
+      const rev = await ghFetchDirect(`/git/commits`, { method: 'POST', body: JSON.stringify({ message: `Revert ${sha.slice(0, 7)}`, tree: parentCommit.tree.sha, parents: [ref.object.sha] }) });
+      await ghFetchDirect(`/git/refs/heads/${encodeURIComponent(branch)}`, { method: 'PATCH', body: JSON.stringify({ sha: rev.sha, force: false }) });
+      ai.appendLog(`⏪ تم استرجاع الحالة قبل ${sha.slice(0, 7)}.`, 'bot');
+      await fetchAllTxtFromUrl($('txtUrl').value); if (APP.liveCompanion) await APP.liveCompanion.pullMemoryFromGitHub(); await refreshGitHubCommits();
+    } catch (e) { ai.appendLog('❌ فشل الاسترجاع: ' + e.message, 'err'); }
+  };
+}
+
+APP.github = {
+  DEFAULT_AI_MEMORY, mergeMemoryObjects, getRepoTarget, ghFetchDirect, getGitHubSnapshot,
+  commitDirectToGitHub, refreshGitHubCommits, applyAbilityEdit, getWorkingRepoFiles
+};
+APP.editHtmlFromPrompt = editHtmlOrRepoFromPrompt;
