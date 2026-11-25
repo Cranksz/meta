@@ -4,32 +4,25 @@
 # robot ball & Three.js generator (NEVER pre-scripted — always built in realtime).
 # ==============================================================================
 
-REALTIME CRAFT & REALISM GUIDE (ADAPT FREELY TO USER'S EXACT DEMAND):
-
-1. REALISTIC SHADERS & SURFACE IMPERFECTIONS (NO FLAT CARTOON LOOK):
-- Never use flat unlit `MeshBasicMaterial` (except tiny additive sparks/glows) and never leave surfaces as one clean, uniform plastic color.
-- Add natural smudges, subtle dirt/wear in crevices, mottled tonal randomness, and micro-scratches: generate a procedural `CanvasTexture` combining soft radial grime smudges, brushed streaks, or organic mottling paired with `roughnessMap` + `APP.tex.bumpNoise()` (or `bumpMap`) so light breaks up naturally across the surface.
-- Use `THREE.MeshPhysicalMaterial` with `envMap: APP.reflectionCube`, `envMapIntensity`, calibrated `roughness` / `metalness`, or custom `ShaderMaterial` / `onBeforeCompile` (Fresnel rim, depth/caustics, procedural noise) for lifelike depth.
-
-2. SMOOTH, NATURAL EDGES (NO FAKE POINTY OR SHARP TOY CORNERS):
-- Avoid harsh razor-sharp corners, needle tips, or blocky low-poly triangles.
-- Use `THREE.ExtrudeGeometry` with `bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.012, bevelSegments: 4`, smooth curved `THREE.LatheGeometry` profiles with rounded rims, `THREE.TubeGeometry` along `CatmullRomCurve3`, rounded cylinders/spheres (`24–48` segments), and call `geom.computeVertexNormals()` after any vertex sculpting.
-
-3. MULTI-MATERIAL ANATOMY (NEVER ONE SINGLE MATERIAL LIKE A PLASTIC TOY):
-- Always assign distinct physical materials to each real-world part of a creation:
-  * FUR / HAIR: Never leave furry parts smooth! Add realistic fur using either layered `InstancedMesh` tapered hair tufts/blades oriented along surface normals (`inst.userData.skipMatrixShader = true`, per-instance color/tilt jitter, `sheen: 1.0`, `roughness: 0.82`) or multi-shell fur + high-frequency hair-strand `CanvasTexture` + `bumpMap` + subtle `APP.onTick` wind sway.
-  * METAL: High `metalness: 0.88–0.98`, low-mid `roughness: 0.14–0.32`, `APP.tex.metal()`, subtle edge scratches, and `APP.reflectionCube` reflections.
-  * GLASS / LIQUID: `MeshPhysicalMaterial` with `transparent: true`, `opacity: 0.25–0.45`, `transmission: 0.85`, `roughness: 0.02–0.06`, `clearcoat: 1.0`, `ior: 1.45`, `envMapIntensity: 2.5`.
-  * WOOD / STONE / SKIN: Textured `CanvasTexture` + `bumpMap` + varied `roughness` (`0.45–0.88`), subtle sheen/subsurface warmth, and clear child `.name` labels ("fur_coat", "metal_frame", "glass_dome", "stone_base").
-
-4. SINKING WET CLOTH & REALTIME WATER PHYSICS:
-- Whenever simulating cloth or fabric interacting with water: any cloth vertices/nodes below or colliding with the water surface MUST switch to lower downward gravity (buoyancy-reduced sinking gravity ~15%–35% of normal `APP.worldG`), higher water drag/damping, and slightly darker wet-fabric shading so the cloth realistically becomes heavy, sinks smoothly through water, and billows instead of bouncing like dry rubber.
-- Register solid creations with `APP._phys?.register(ent, "rigid", { restitution: 0.4 })` or collide droplets/particles via `APP.phys.collidePoint(pos, r, vel, 0.3, 0.85)`.
-
-5. PHOTOS, TEXTURES & LIVING MOTION:
-- Imported photos ("that photo", "الصورة"): apply `APP.findImage("last")` or `apply_or_generate_texture` with `image_name: "last"`.
-- Described textures ("weathered marble", "galaxy"): call `await APP.generateTexture(prompt)` or `apply_or_generate_texture` with `bumpScale`, `repeat`, and `color: 0xffffff`.
-- Animate every living creation with `APP.onTick((dt, t) => ...)` (`inst.userData.skipMatrixShader = true` on any `InstancedMesh`), plus `APP.fx.spawnPoint(...)` and `APP.sfx.play(...)`.
+# REALTIME CRAFT & REALISM GUIDE (ADAPT FREELY TO USER'S EXACT DEMAND):
+#
+# 1. REALISTIC SHADERS & SURFACE IMPERFECTIONS (NO FLAT CARTOON LOOK):
+# - Never use flat unlit MeshBasicMaterial (except tiny additive sparks/glows) and never leave surfaces as one clean, uniform plastic color.
+# - Add natural smudges, subtle dirt/wear in crevices, mottled tonal randomness, and micro-scratches: generate a procedural CanvasTexture combining soft radial grime smudges, brushed streaks, or organic mottling paired with roughnessMap + APP.tex.bumpNoise() so light breaks up naturally across the surface.
+# - Use THREE.MeshPhysicalMaterial with envMap: APP.reflectionCube, envMapIntensity, calibrated roughness / metalness.
+#
+# 2. SMOOTH, NATURAL EDGES & SEAMLESS BLENDING (NO TOY LOOK):
+# - NEVER make 3D models out of raw separated spheres, boxes, and cylinders like a kids toy. Make models realistic with parts blended together smoothly and realistically. No cartoony look, no empty spaces between parts.
+# - Use THREE.ExtrudeGeometry with bevelEnabled: true, smooth curved profiles, rounded cylinders/spheres (24-48 segments), and call geom.computeVertexNormals().
+#
+# 3. REALISTIC DESTRUCTION & SHATTERING (RANDOM SHAPES, SIZES & DUST):
+# - When breaking something or shattering an object, DO NOT split it into parts that have the same shapes and same size.
+# - Make shattered shard shapes and sizes completely random and irregular.
+# - Always add procedural dust clouds, smoke, and small flying particles when breaking or shattering objects.
+#
+# 4. MULTI-MATERIAL ANATOMY & LIVING MOTION:
+# - Assign distinct physical materials to each real-world part (fur, metal, glass, wood, stone).
+# - Animate creations with APP.onTick and add sound effects & particle fx.
 
 @ability: instruction2_training_bridge
 @autorun

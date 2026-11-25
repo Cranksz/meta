@@ -5,32 +5,21 @@
     "interaction.txt",
     "physics.txt",
     "drawing.txt",
-    "models.txt"
+    "models.txt",
+    "bot.txt"
   ],
   "conventions": [
-    "Every ability uses @ability: <unique_id>, @match: <ar & en patterns>, and @code: or @do:.",
-    "Always include both English and Arabic keywords in @match.",
-    "Use APP.THREE instead of global THREE inside @ability blocks.",
-    "Set instancedMesh.userData.skipMatrixShader = true on InstancedMesh objects so applyDissolveShader never discards them.",
-    "Background systems that register APP.onTick(..., null, true) must clean up previous globals on hot-reload.",
-    "Do not duplicate @match triggers that already exist in an earlier file in priorityOrder unless updating or removing the duplicate."
-  ],
-  "appApiSummary": [
-    "APP.THREE, APP.scene, APP.camera, APP.renderer, APP.SkeletonUtils, APP.gltfLoader",
-    "APP.entities, APP.hands, APP.dhand, APP.headPos, APP.headFwd, APP.pointer, APP.ragdollMode",
-    "APP.tex: bumpNoise(rep, contrast), wood(base, dark, rep), metal(base, rep), carbon(rep), stone(base, rep), ice(rep)",
-    "APP.phys: register(b), unregister(b), collidePoint(pos, radius, vel, bounce, friction), waterHook",
-    "APP._phys: register(ent, mode, extra) [from physics.txt]",
-    "APP.spawnPos(dist, yawDeg), APP.registerEntity(opts), APP.removeEntity(ent), APP.findEntities(spec)",
-    "APP.computeBox(root), APP.applyDissolveShader(root, minY, maxY, radial), APP.updateReflection(pos)",
-    "APP.fx: spawnPoint(kind,x,y,z,scale,color), spawnBox(box,kind,count), groundPulse(x,z,maxR,color)",
-    "APP.sfx.play(\"build\"|\"burn\"|\"delete\"|\"magic\"|\"click\"|\"shatter\"|\"soft\"|\"splash\")",
-    "APP.on(event, fn), APP.emit(event, data), APP.onTick(id, dur, fn, onEnd, persistent), APP.stopTick(id), APP.say(msg)"
+    "Use APP.THREE instead of global THREE inside @ability and procedural blocks.",
+    "Always combine AI creativity with repository instructions (interaction.txt, physics.txt, bot.txt, models.txt).",
+    "Set instancedMesh.userData.skipMatrixShader = true on InstancedMesh objects.",
+    "Only add @pin if a user explicitly asks to pin a button to the toolbar; keep the toolbar clean and basic.",
+    "Support live HTML/DOM/CSS edits when requested from the prompt tape or AI Studio."
   ],
   "learnedRules": [
     "Always make sure new pen objects are initialized with active drawing capabilities.",
     "Ensure the 'delete all' command permanently removes all active entities from the simulation without them reappearing.",
-    "Always ensure new pen objects are initialized with active drawing capabilities."
+    "Always ensure new pen objects are initialized with active drawing capabilities.",
+    "Always comment all text outside @ability blocks in .txt files with # to prevent parser errors."
   ],
   "userPreferences": {
     "objects": {
@@ -236,5 +225,11 @@
       "sentiment": "correction",
       "summary": "User wants the toolbar to be blue, but the code for brush_toolbar does not currently support color changes."
     }
-  ]
+  ],
+  "toolbar": {
+    "customButtons": [],
+    "hiddenIds": [],
+    "renamed": {}
+  },
+  "botAppearance": null
 }
