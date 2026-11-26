@@ -1,0 +1,1182 @@
+@ability: bot_brain_module
+@autorun
+@code:
+const { $, THREE, V3, NOW, clamp, say, normalizeText, scene, camera, renderer, headPos, headFwd, hands, pointer, entities, importedImages, importedGLBs, findEntities, computeBox, createProcedural, attachEntityScript, applyTexture, modify, toolbar, loadedTxtFiles, getAbilityFileIndex, parseAbilitiesTxt, getMergedAbilitiesText, saveFilesCache, runAbility, sfx, fx, stepHooks, pokeHooks, ai, github } = APP;
+const aiState = ai.state;
+
+if (APP._botRootGroup) {
+  scene.remove(APP._botRootGroup);
+  APP._botRootGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+}
+
+function uint8ToB64(u8) { let bin = ''; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(bin); }
+async function blobToB64(blob) { return uint8ToB64(new Uint8Array(await blob.arrayBuffer())); }
+function b64Pcm16ToFloat32(b64) {
+  const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  const view = new DataView(bytes.buffer), samples = Math.floor(len / 2), f32 = new Float32Array(samples);
+  for (let i = 0; i < samples; i++) f32[i] = view.getInt16(i * 2, true) / 32768;
+  return f32;
+}
+function downsampleTo16kInt16(float32, inRate) {
+  if (inRate === 16000) { const out = new Int16Array(float32.length); for (let i = 0; i < float32.length; i++) { const s = clamp(float32[i], -1, 1); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; } return out; }
+  const ratio = inRate / 16000, newLen = Math.max(1, Math.floor(float32.length / ratio)), out = new Int16Array(newLen);
+  for (let i = 0; i < newLen; i++) { const pos = i * ratio, idx = Math.floor(pos), frac = pos - idx, a = float32[idx] || 0, b = float32[Math.min(float32.length - 1, idx + 1)] || a, s = clamp(a + (b - a) * frac, -1, 1); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+  return out;
+}
+
+const COMPANION_STATES = {
+  standby:       { color: 0x336655, ring: 0x224433, tag: '🤖 في وضع الاستعداد' },
+  connecting:    { color: 0xffaa22, ring: 0xffcc44, tag: '⚡ جاري الاتصال...' },
+  watching:      { color: 0x00ffaa, ring: 0x00e5ff, tag: '👁 أراقب وأستمع...' },
+  user_speaking: { color: 0x00e5ff, ring: 0x55ffff, tag: '🎙 أسمعك الآن...' },
+  ai_speaking:   { color: 0x88ff44, ring: 0x00ff99, tag: '🗣 أتحدث...' },
+  learning:      { color: 0xffc83d, ring: 0xffea70, tag: '🧠 تم الإبداع!' },
+  coding:        { color: 0xaa66ff, ring: 0x00e5ff, tag: '🛠 جاري التنفيذ...' },
+  synced:        { color: 0x44ffcc, ring: 0x00ffaa, tag: '💾 تم الحفظ!' },
+  error:         { color: 0xff4455, ring: 0xff7788, tag: '⚠️ خطأ — انظر السجل' }
+};
+
+// Smart Robotic Sphere + Articulated 12-Segment Tentacle Rig
+function createSmartRobotRig() {
+  const root = new THREE.Group();
+  const shellGroup = new THREE.Group();
+  root.add(shellGroup);
+
+  const hullMat = new THREE.MeshPhysicalMaterial({ color: 0x1a222a, roughness: 0.24, metalness: 0.86, clearcoat: 0.65 });
+  const trimMat = new THREE.MeshPhysicalMaterial({ color: 0x8fa4b8, roughness: 0.16, metalness: 0.94, clearcoat: 0.8 });
+  const visorMat = new THREE.MeshPhysicalMaterial({ color: 0x050b10, roughness: 0.06, metalness: 0.2, clearcoat: 1.0 });
+  const coreMat = new THREE.MeshStandardMaterial({ color: 0x00ffaa, emissive: 0x00ffaa, emissiveIntensity: 1.9, roughness: 0.2 });
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
+
+  // Main armored sphere + cheek fins + glowing optic eye
+  const hull = new THREE.Mesh(new THREE.SphereGeometry(0.115, 28, 22), hullMat);
+  const visor = new THREE.Mesh(new THREE.SphereGeometry(0.092, 24, 18, 0, Math.PI * 2, 0.35, 1.3), visorMat);
+  visor.rotation.x = Math.PI * 0.5;
+  visor.position.z = 0.036;
+  const eyeCore = new THREE.Mesh(new THREE.SphereGeometry(0.032, 18, 14), coreMat);
+  eyeCore.position.set(0, 0.005, 0.102);
+  const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.015, 12, 10), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  pupil.position.set(0, 0.005, 0.123);
+
+  const halo = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.0045, 10, 48), ringMat);
+  halo.rotation.x = 1.15;
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.011, 10, 24), trimMat);
+  collar.rotation.x = Math.PI * 0.5;
+  collar.position.y = -0.108;
+
+  for (const sd of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.028, 0.026, 16), trimMat);
+    ear.rotation.z = Math.PI * 0.5;
+    ear.position.set(sd * 0.115, 0.01, 0);
+    shellGroup.add(ear);
+  }
+  shellGroup.add(hull, visor, eyeCore, pupil, halo, collar);
+
+  // Articulated Tentacle (lives in rootGroup local space, independent of shell rotation)
+  const tentacleGroup = new THREE.Group();
+  root.add(tentacleGroup);
+  const N_SEG = 12;
+  const segs = [];
+  const segDarkMat = new THREE.MeshPhysicalMaterial({ color: 0x1e2830, roughness: 0.32, metalness: 0.85, clearcoat: 0.4 });
+  const jointGlowMat = new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00ccff, emissiveIntensity: 1.4, roughness: 0.25 });
+
+  for (let i = 0; i < N_SEG; i++) {
+    const k = i / (N_SEG - 1);
+    const r = 0.027 * (1 - k * 0.56);
+    const node = new THREE.Group();
+    const link = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.85, r, 0.068, 12), segDarkMat);
+    link.rotation.x = Math.PI * 0.5;
+    const ring = new THREE.Mesh(new THREE.SphereGeometry(r * 1.04, 12, 10), i % 2 === 0 ? jointGlowMat : trimMat);
+    node.add(link, ring);
+    tentacleGroup.add(node);
+    segs.push(node);
+  }
+
+  // 3-prong mechanical claw at tentacle tip + holographic show laser
+  const clawGroup = new THREE.Group();
+  tentacleGroup.add(clawGroup);
+  const palm = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.022, 0.032, 12), trimMat);
+  palm.rotation.x = Math.PI * 0.5;
+  clawGroup.add(palm);
+
+  const claws = [];
+  for (let c = 0; c < 3; c++) {
+    const ang = (c / 3) * Math.PI * 2;
+    const pivot = new THREE.Group();
+    pivot.rotation.z = ang;
+    pivot.position.set(Math.cos(ang) * 0.014, Math.sin(ang) * 0.014, 0.015);
+    const finger = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.01, 0.052), jointGlowMat);
+    finger.position.set(0, 0.008, 0.026);
+    pivot.add(finger);
+    clawGroup.add(pivot);
+    claws.push(pivot);
+  }
+
+  const beamMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false });
+  const showBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.012, 1.0, 10, 1, true), beamMat);
+  showBeam.rotation.x = Math.PI * 0.5;
+  showBeam.visible = false;
+  tentacleGroup.add(showBeam);
+
+  const hitProxy = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), new THREE.MeshBasicMaterial({ visible: false }));
+  root.add(hitProxy);
+
+  return {
+    group: root, shellGroup, tentacleGroup, segs, clawGroup, claws, showBeam,
+    orb: hull, ring: halo, coreMat, ringMat, jointGlowMat, hitProxy,
+    tipLocal: new V3(0.09, -0.22, 0.11),
+    clawOpen: 0.65
+  };
+}
+
+class LiveCompanionEngine {
+  constructor() {
+    this.enabled = false; this.connected = false; this.connecting = false; this.multimodalTurnMode = false; this.muted = false; this.ws = null;
+    this.modelName = localStorage.getItem('ai_live_model') || $('aiModel')?.value || 'gemini-3.8-flash';
+    if ($('liveBotModel') && ![...$('liveBotModel').options].some(o => o.value === this.modelName)) this.modelName = 'gemini-3.8-flash';
+    this.voiceName = localStorage.getItem('ai_live_voice') || 'Kore';
+
+    this.state = 'standby'; this.mood = 'curious'; this.stateFlashUntil = 0; this.birthTime = 0; this.dissolveTime = null;
+    this.vel = new V3(); this.pos = new V3(0.38, 1.52, -1.2); this.anchorPos = this.pos.clone();
+    this.recoilVel = new V3(); this.inspectUntil = 0; this.inspectPoint = new V3(); this.shutterPulse = 0;
+    this.navMode = 'smart'; this.flightTarget = null;
+
+    // Tentacle interaction state
+    this.tentacleMode = 'idle'; // 'idle' | 'show' | 'grabbing' | 'holding' | 'handing'
+    this.tentacleTargetEnt = null;
+    this.tentacleTargetPt = new V3();
+    this.tentacleShowUntil = 0;
+    this.heldEnt = null;
+    this.heldLocalOffset = new V3();
+    this.handAutoRelease = false;
+
+    this.rootGroup = new THREE.Group(); this.rootGroup.visible = false; this.rootGroup.position.copy(this.pos); scene.add(this.rootGroup);
+    APP._botRootGroup = this.rootGroup;
+    this.rig = createSmartRobotRig();
+    this.rootGroup.add(this.rig.group);
+    this.fallbackRig = this.rig;
+    this.controller = null; this.dynamicTools = new Map(); this.customOutputRouter = null;
+    this._lastToolsSig = ''; this._toolResyncTimer = null;
+
+    this.inCtx = null; this.inStream = null; this.inSource = null; this.inProc = null;
+    this.inPcmAccum = []; this.inPcmLen = 0; this.inRms = 0;
+    this.vadNoise = 0.005; this.vadCalibUntil = 0;
+    this.turnSpeechChunks = []; this.turnVadSpeaking = false; this.turnVadStart = 0; this.turnVadLastLoud = 0; this.turnPreRoll = []; this.turnSpeechRec = null;
+
+    this.outCtx = null; this.outGain = null; this.outAnalyser = null; this.outTimeData = null;
+    this.outSources = new Set(); this.nextPlayAt = 0; this.outRms = 0; this.aiSpeakingUntil = 0;
+
+    this.visionCanvas = document.createElement('canvas'); this.visionCanvas.width = 512; this.visionCanvas.height = 288;
+    this.visionCtx = this.visionCanvas.getContext('2d'); this.latestVisionB64 = '';
+    this.lastFrameAt = 0; this.frameIntervalMs = 1500;
+
+    this.pendingTextQueue = []; this.turnHistory = []; this.turnBusy = false;
+    this.inputTranscriptBuf = ''; this.outputTranscriptBuf = '';
+    this.memory = this.loadLocalMemory(); this.memoryDirty = false; this.syncTimer = null;
+    this.refreshUI();
+  }
+
+  setController(ctrl) {
+    this.clearController(); this.controller = ctrl || null;
+    if (this.controller) {
+      this.rig.group.visible = false;
+      try { this.controller.mount?.(this.rootGroup, this); } catch (e) { console.warn('bot mount error', e); }
+      try { this.controller.onStateChange?.(this.state, this.mood, ''); } catch {}
+    }
+  }
+  clearController() {
+    try { this.controller?.unmount?.(this.rootGroup, this); } catch {}
+    this.controller = null; this.customOutputRouter = null; this.reconnectOutputGraph(); this.rig.group.visible = true;
+  }
+  registerTool(declaration, handlerFn) {
+    if (!declaration?.name || typeof handlerFn !== 'function') return;
+    this.dynamicTools.set(declaration.name, { declaration, handler: handlerFn });
+    const sig = [...this.dynamicTools.keys()].sort().join(',');
+    if (this.enabled && this.connected && !this.multimodalTurnMode && sig !== this._lastToolsSig) {
+      this._lastToolsSig = sig;
+      clearTimeout(this._toolResyncTimer);
+      this._toolResyncTimer = setTimeout(() => {
+        if (this.enabled && this.connected && !this.multimodalTurnMode && !this.connecting) this.startLiveSession().catch(() => {});
+      }, 450);
+    }
+  }
+  clearBotExtensions() { this.dynamicTools.clear(); this.clearController(); }
+  setOutputRouter(connectFn) { this.customOutputRouter = typeof connectFn === 'function' ? connectFn : null; this.reconnectOutputGraph(); }
+  reconnectOutputGraph() {
+    if (!this.outCtx || !this.outGain || !this.outAnalyser) return;
+    try { this.outGain.disconnect(); } catch {} try { this.outAnalyser.disconnect(); } catch {}
+    this.outGain.connect(this.outAnalyser);
+    if (this.customOutputRouter) {
+      try { const tail = this.customOutputRouter(this.outCtx, this.outAnalyser); if (tail?.connect) { tail.connect(this.outCtx.destination); return; } } catch {}
+    }
+    this.outAnalyser.connect(this.outCtx.destination);
+  }
+  getGeminiKey() { return aiState.geminiKey; }
+  getOpenAiKey() { return aiState.openAiKey; }
+  getClaudeKey() { return aiState.claudeKey; }
+  getGroqKey() { return aiState.groqKey || ($('freeSttKey')?.value || '').trim(); }
+
+  setMood(moodName, subText = '') { this.mood = String(moodName || 'curious'); try { this.controller?.onStateChange?.(this.state, this.mood, subText); } catch {} }
+  triggerBotAction(actionName, payload) { return this.controller?.onAction ? this.controller.onAction(actionName, payload) : null; }
+  flyTo(pos, speed = 7.5) { this.flightTarget = { pos: pos.clone(), speed }; }
+  clearFlight() { this.flightTarget = null; }
+  setNavMode(mode, targetPos = null) { this.navMode = mode || 'smart'; if (targetPos) { this.anchorPos.copy(targetPos); } if (mode === 'stay') this.anchorPos.copy(this.pos); }
+
+  // === TENTACLE ACTIONS: SHOW, GRAB/HOLD, HAND TO USER, RELEASE ===
+  resolveTargetEntity(targetQuery = 'last') {
+    if (targetQuery && typeof targetQuery === 'object' && targetQuery.root) return targetQuery;
+    const list = findEntities(targetQuery || 'last');
+    return list[0] || null;
+  }
+
+  showWithTentacle(targetQuery = 'last', durationSec = 4.5) {
+    const ent = this.resolveTargetEntity(targetQuery);
+    if (!ent) return { ok: false, error: 'لا يوجد مجسم في المشهد لأشير إليه.' };
+    if (this.heldEnt === ent) {
+      this.tentacleMode = 'holding';
+      return { ok: true, action: 'showing_held', target: ent.name };
+    }
+    const box = computeBox(ent.root), center = box.getCenter(new V3());
+    this.tentacleTargetEnt = ent;
+    this.tentacleTargetPt.copy(center);
+    this.tentacleMode = 'show';
+    this.tentacleShowUntil = NOW() + Number(durationSec || 4.5);
+    this.inspectPoint.copy(center);
+    this.inspectUntil = this.tentacleShowUntil;
+
+    // Fly beside the object so the tentacle can cleanly showcase it
+    const toUser = headPos.clone().sub(center).setY(0).normalize();
+    const rightSide = new V3().crossVectors(new V3(0, 1, 0), toUser).normalize();
+    const hoverPos = center.clone().addScaledVector(toUser, 0.68).addScaledVector(rightSide, 0.42);
+    hoverPos.y = clamp(Math.max(box.max.y + 0.15, 1.15), 0.85, 2.25);
+    this.setNavMode('stay', hoverPos);
+    this.flyTo(hoverPos, 6.2);
+    sfx.play('magic');
+    fx.groundPulse(center.x, center.z, 1.3, 0x00ffe0);
+    return { ok: true, action: 'showing', target: ent.name };
+  }
+
+  grabAndHoldWithTentacle(targetQuery = 'last') {
+    const ent = this.resolveTargetEntity(targetQuery);
+    if (!ent) return { ok: false, error: 'لا يوجد مجسم للإمساك به.' };
+    if (this.heldEnt && this.heldEnt !== ent) this.releaseTentacle(true);
+    const box = computeBox(ent.root), center = box.getCenter(new V3());
+    this.tentacleTargetEnt = ent;
+    this.tentacleTargetPt.copy(center);
+    this.tentacleMode = 'grabbing';
+    this.handAutoRelease = false;
+    this.inspectPoint.copy(center);
+    this.inspectUntil = NOW() + 5.0;
+
+    // Fly close enough to clamp tentacle onto the object
+    const toUser = headPos.clone().sub(center).setY(0).normalize();
+    const grabHover = center.clone().addScaledVector(toUser, 0.48);
+    grabHover.y = clamp(center.y + 0.36, 0.72, 2.2);
+    this.setNavMode('stay', grabHover);
+    this.flyTo(grabHover, 7.2);
+    sfx.play('click');
+    return { ok: true, action: 'grabbing', target: ent.name };
+  }
+
+  handToUserWithTentacle(targetQuery = 'last', autoRelease = false) {
+    const ent = this.heldEnt || this.resolveTargetEntity(targetQuery);
+    if (!ent) return { ok: false, error: 'لا يوجد مجسم لأناوله لك.' };
+    this.handAutoRelease = Boolean(autoRelease);
+    if (this.heldEnt === ent) {
+      this.tentacleMode = 'handing';
+      this.flyToUserHandPos();
+      return { ok: true, action: 'handing', target: ent.name };
+    }
+    this.tentacleTargetEnt = ent;
+    this.tentacleMode = 'grabbing';
+    this._afterGrabHand = true;
+    const box = computeBox(ent.root), center = box.getCenter(new V3());
+    const toUser = headPos.clone().sub(center).setY(0).normalize();
+    const grabHover = center.clone().addScaledVector(toUser, 0.48);
+    grabHover.y = clamp(center.y + 0.36, 0.72, 2.2);
+    this.setNavMode('stay', grabHover);
+    this.flyTo(grabHover, 7.8);
+    sfx.play('click');
+    return { ok: true, action: 'fetching_to_hand', target: ent.name };
+  }
+
+  flyToUserHandPos() {
+    const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+    const offerPos = headPos.clone().addScaledVector(headFwd, 0.78).addScaledVector(right, 0.24);
+    offerPos.y = clamp(headPos.y - 0.02, 0.9, 2.15);
+    this.setNavMode('stay', offerPos);
+    this.flyTo(offerPos, 6.2);
+  }
+
+  releaseTentacle(reapplyPhysics = true) {
+    const ent = this.heldEnt;
+    if (ent) {
+      if (ent.heldBy === 'bot_tentacle') ent.heldBy = null;
+      if (reapplyPhysics && APP._phys && ent.type !== 'machine' && ent.type !== 'piano' && ent.type !== 'door' && ent.type !== 'window') {
+        APP._phys.register(ent, ent._physBody ? ent._physBody.mode : 'rigid');
+      }
+    }
+    this.heldEnt = null;
+    this._afterGrabHand = false;
+    this.tentacleTargetEnt = null;
+    this.tentacleMode = 'idle';
+    this.rig.showBeam.visible = false;
+    sfx.play('click');
+    return { ok: true, released: ent ? ent.name : null };
+  }
+
+  loadLocalMemory() { try { const r = localStorage.getItem('ai_live_memory_v1'); if (r) return github.mergeMemoryObjects(github.DEFAULT_AI_MEMORY, JSON.parse(r)); } catch {} return structuredClone(github.DEFAULT_AI_MEMORY); }
+  saveLocalMemory() { try { localStorage.setItem('ai_live_memory_v1', JSON.stringify(this.memory)); } catch {} this.refreshMemoryCounter(); }
+  setMemory(mem) { this.memory = github.mergeMemoryObjects(github.DEFAULT_AI_MEMORY, mem); this.saveLocalMemory(); toolbar?.renderAll?.(); }
+  refreshMemoryCounter() { const c = (this.memory.learnedRules?.length || 0) + Object.keys(this.memory.userPreferences?.objects || {}).length + (this.memory.toolbar?.customButtons?.length || 0); if ($('liveMemCount')) $('liveMemCount').textContent = `${c} تفضيلات/أزرار`; }
+  async pullMemoryFromGitHub() { try { if (!aiState.githubToken) return; const { branch } = github.getRepoTarget(); const f = await github.ghFetchDirect(`/contents/ai_memory.json?ref=${encodeURIComponent(branch)}&t=${Date.now()}`); if (f?.content) this.setMemory(ai.parseJsonSafe(atob(f.content.replace(/\s+/g, '')))); } catch {} }
+  scheduleGitHubMemorySync(delayMs = 6000) { this.memoryDirty = true; clearTimeout(this.syncTimer); if (aiState.githubToken) this.syncTimer = setTimeout(() => this.flushMemoryToGitHub(), delayMs); }
+  async flushMemoryToGitHub() {
+    clearTimeout(this.syncTimer); if (!this.memoryDirty || !aiState.githubToken) return; this.memoryDirty = false;
+    try {
+      const snap = await github.getGitHubSnapshot(); let merged = structuredClone(this.memory);
+      if (snap['ai_memory.json']) { try { merged = github.mergeMemoryObjects(ai.parseJsonSafe(snap['ai_memory.json'].content), this.memory); } catch {} }
+      this.memory = merged; this.saveLocalMemory();
+      const res = await github.commitDirectToGitHub([{ path: 'ai_memory.json', content: JSON.stringify(merged, null, 2) + '\n' }], 'AI Companion: sync memory');
+      this.flashState('synced', '💾 تم حفظ الذاكرة في GitHub', '', 2.5); await github.refreshGitHubCommits(); return res;
+    } catch { this.memoryDirty = true; }
+  }
+
+  setState(st, subText = '') {
+    this.state = st; const info = COMPANION_STATES[st] || COMPANION_STATES.watching;
+    if (this.rig?.coreMat) {
+      this.rig.coreMat.color.setHex(info.color);
+      this.rig.coreMat.emissive.setHex(info.color);
+      this.rig.ringMat.color.setHex(info.ring);
+      this.rig.jointGlowMat.color.setHex(info.ring);
+      this.rig.jointGlowMat.emissive.setHex(info.color);
+    }
+    try { this.controller?.onStateChange?.(st, this.mood, subText || info.tag); } catch {}
+    this.refreshUI();
+  }
+  flashState(st, title, sub = '', sec = 2.6) { this.stateFlashUntil = NOW() + sec; this.setState(st, title ? `${title} ${sub}`.trim() : sub); }
+  refreshUI() {
+    this.refreshMemoryCounter();
+    const sw = $('liveBotSwitch'), wrap = $('liveBotSwitchWrap'), lbl = $('liveBotSwitchLbl'), badge = $('liveBotStateBadge');
+    if (sw) sw.checked = this.enabled;
+    if (wrap) wrap.classList.toggle('on', this.enabled);
+    if (lbl) lbl.textContent = this.enabled ? (this.connected ? '🤖 الكرة: ON' : '🤖 الكرة: ⏳') : '🤖 الكرة: OFF';
+    if (badge) { badge.className = 'ai-badge' + (this.connected ? ' live-on' : ''); badge.textContent = !this.enabled ? '🤖 متوقف' : (this.connected ? `🟢 ${this.modelName}` : '🟡 جاري الاتصال...'); }
+    if ($('liveMuteBtn')) $('liveMuteBtn').textContent = this.muted ? '🔇 مكتوم' : '🔊 صوتها';
+    APP.rebuildToolbar?.();
+  }
+  isWebSocketLiveModel(mdl) { return /live|native-audio/i.test(String(mdl || '')); }
+
+  async setEnabled(on) {
+    on = Boolean(on); if (on === this.enabled) return;
+    ai.saveCreds();
+    if (on) {
+      if (APP.voice?.micOn) APP.voice.stopMicAll();
+      try { await this.ensureAudioOutput(); } catch {}
+      try { window.speechSynthesis?.getVoices?.(); } catch {}
+      this.enabled = true; this.dissolveTime = null; this.birthTime = NOW(); this.rootGroup.visible = true;
+      const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+      const sideOff = renderer.xr.isPresenting ? 0.52 : Math.min(0.48, Math.max(0.2, camera.aspect * 0.34));
+      this.pos.copy(headPos).addScaledVector(headFwd, 1.25).addScaledVector(right, sideOff).add(new V3(0, -0.06, 0));
+      this.anchorPos.copy(this.pos); this.rootGroup.position.copy(this.pos); sfx.play('magic');
+      if (window.isSecureContext) { try { await this.startAudioInput(); } catch (micErr) { ai.appendLog('⚠️ الميكروفون: ' + (micErr.message || micErr), 'err'); } }
+      this.pullMemoryFromGitHub().catch(() => {});
+      try { await this.startLiveSession(); }
+      catch (err) {
+        const msg = err.message || 'خطأ في الاتصال';
+        this.setState('error', msg);
+        ai.appendLog('❌ ' + msg, 'err');
+        say('❌ ' + msg);
+      }
+    } else {
+      this.releaseTentacle(true);
+      this.enabled = false; this.connected = false; this.connecting = false; this.multimodalTurnMode = false;
+      this.dissolveTime = NOW(); this.setState('standby', 'تم الإيقاف');
+      this.stopTurnSpeechLoop(); this.stopAudioInput(); this.stopAudioOutput(); this.closeWebSocket();
+      try { window.speechSynthesis?.cancel(); } catch {}
+      this.flushMemoryToGitHub(); this.refreshUI(); sfx.play('delete');
+    }
+  }
+
+  async startLiveSession() {
+    if (!this.enabled) return;
+    ai.saveCreds(); this.closeWebSocket(); this.stopTurnSpeechLoop(); this.connected = false; this.connecting = true;
+    const mdl = this.modelName;
+    if (this.isWebSocketLiveModel(mdl)) {
+      if (!aiState.geminiKey.startsWith('AIza')) throw new Error('نموذج Live WS يحتاج مفتاح Gemini (AIza...) في الإعدادات ⚙️.');
+      await this.connectExactWebSocket(mdl); return;
+    }
+    const chain = await ai.getSmartProviderChain(mdl);
+    this.modelName = chain[0];
+    this.activateMultimodalTurnMode(this.modelName);
+  }
+
+  activateMultimodalTurnMode(mdl) {
+    this.multimodalTurnMode = true; this.connected = true; this.connecting = false;
+    this.setState('watching', mdl); this.startTurnSpeechLoop();
+    ai.appendLog(`🟢 الكرة متصلة بـ (${mdl})! تكلم أو اكتب طلبك الآن.`, 'bot');
+    say(`🤖 الكرة جاهزة (${mdl})`);
+    while (this.pendingTextQueue.length) this.runMultimodalTurn(this.pendingTextQueue.shift());
+  }
+
+  startTurnSpeechLoop() {
+    this.stopTurnSpeechLoop();
+    const canUseWebAudioVoice = (this.getGroqKey().startsWith('gsk_') || aiState.geminiKey.startsWith('AIza'));
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!canUseWebAudioVoice && SR) {
+      try {
+        const rec = new SR(), lc = $('sttLang')?.value;
+        rec.lang = lc === 'en' ? 'en-US' : 'ar-DZ';
+        rec.continuous = true; rec.interimResults = false;
+        rec.onresult = e => {
+          if (!this.enabled || !this.multimodalTurnMode) return;
+          const res = e.results[e.results.length - 1], txt = res?.[0]?.transcript?.trim() || '';
+          if (res.isFinal && txt && !this.isPhantomNoiseTranscript(txt)) this.runMultimodalTurn(txt);
+        };
+        rec.onend = () => { if (this.enabled && this.multimodalTurnMode && this.turnSpeechRec === rec) setTimeout(() => { try { rec.start(); } catch {} }, 350); };
+        rec.start(); this.turnSpeechRec = rec;
+      } catch {}
+    }
+  }
+  stopTurnSpeechLoop() { if (this.turnSpeechRec) { try { this.turnSpeechRec.onend = null; this.turnSpeechRec.stop(); } catch {} this.turnSpeechRec = null; } this.turnVadSpeaking = false; this.turnSpeechChunks = []; }
+
+  async speakExpressive(text, mood = this.mood) {
+    if (this.muted || !text) return;
+    if (this.controller?.onSpeak) { try { if (await this.controller.onSpeak(text, mood)) return; } catch {} }
+    if ('speechSynthesis' in window) {
+      try {
+        const speakNow = () => {
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = /[\u0600-\u06FF]/.test(text) ? 'ar-SA' : 'en-US';
+          u.pitch = (mood === 'excited' || mood === 'happy') ? 1.12 : 1.03; u.rate = 1.03;
+          u.onstart = () => { this.aiSpeakingUntil = NOW() + 8.0; this.setState('ai_speaking'); };
+          u.onend = () => { this.aiSpeakingUntil = NOW() + 0.35; if (this.connected && NOW() > this.stateFlashUntil) this.setState('watching'); };
+          u.onerror = () => { this.aiSpeakingUntil = 0; };
+          window.speechSynthesis.speak(u);
+        };
+        if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); setTimeout(speakNow, 30); } else speakNow();
+      } catch {}
+    }
+  }
+
+  async sendTextFeedback(text) {
+    const clean = String(text || '').trim(); if (!clean) return;
+    if (!this.enabled) { this.pendingTextQueue.push(clean); await this.setEnabled(true); return; }
+    if (!this.connected) { this.pendingTextQueue.push(clean); ai.appendLog('⏳ بانتظار اتصال الكرة...', 'bot'); return; }
+    if (this.multimodalTurnMode) { await this.runMultimodalTurn(clean); return; }
+    ai.appendLog('💬 للكرة: ' + clean, 'user');
+    this.sendWs({ clientContent: { turns: [{ role: 'user', parts: [{ text: clean }] }], turnComplete: true } });
+  }
+
+  isPhantomNoiseTranscript(txt) {
+    const s = String(txt || '').toLowerCase().trim();
+    if (!s || s.length < 2) return true;
+    return /^(gracias|¡gracias!|hola|subtítulos|amara\.org|suscríbete|thank you|thanks for watching|you|bye|\.+|__silence__)$/i.test(s);
+  }
+
+  async resolveVoiceInputText(audioWavBlob) {
+    if (!audioWavBlob) return '';
+    const lc = $('sttLang')?.value;
+    if (this.getGroqKey().startsWith('gsk_')) {
+      const fd = new FormData();
+      fd.append('file', audioWavBlob, 'live.wav');
+      fd.append('model', 'whisper-large-v3-turbo');
+      fd.append('response_format', 'json');
+      fd.append('temperature', '0');
+      fd.append('language', (lc === 'en' || lc === 'ar') ? lc : 'ar');
+      const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + this.getGroqKey() }, body: fd });
+      const d = await r.json().catch(() => ({}));
+      const txt = (d.text || '').replace(/\[.*?\]|\(.*?\)/g, '').trim();
+      return this.isPhantomNoiseTranscript(txt) ? '' : txt;
+    }
+    if (aiState.geminiKey.startsWith('AIza')) {
+      const b64 = await blobToB64(audioWavBlob);
+      const sttMdl = (!this.modelName.startsWith('openai:') && !this.modelName.startsWith('claude:') && !this.modelName.startsWith('groq:') && !this.isWebSocketLiveModel(this.modelName)) ? this.modelName : 'gemini-3.8-flash';
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(sttMdl)}:generateContent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'Transcribe ONLY clear Arabic or English speech verbatim. If there is only noise, silence, or breathing, output exactly: __SILENCE__' }, { inlineData: { mimeType: 'audio/wav', data: b64 } }] }]
+          })
+        });
+        if (res.ok) {
+          const d = await res.json();
+          const txt = (d.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
+          return this.isPhantomNoiseTranscript(txt) ? '' : txt;
+        }
+      } catch {}
+    }
+    return '';
+  }
+
+  async runSingleModelTurn(mdl, userText, sysPrompt, allDecls, b64) {
+    const contextLine = `[SIM_SNAPSHOT] ${JSON.stringify(this.execInspectState())}\n\nUSER: ${userText}`;
+    let replyText = '';
+
+    if (mdl.startsWith('claude:')) {
+      const cModel = mdl.slice(7), tools = allDecls.map(d => ({ name: d.name, description: d.description, input_schema: ai.lowercaseSchemaTypes(d.parameters || { type: 'object', properties: {} }) }));
+      const uContent = b64 ? [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } }, { type: 'text', text: contextLine }] : contextLine;
+      const messages = [...this.turnHistory.slice(-6), { role: 'user', content: uContent }];
+      for (let round = 0; round < 6; round++) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': aiState.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({ model: cModel, max_tokens: 4096, system: sysPrompt, messages, tools })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(ai.formatFriendlyError(mdl, res.status, data.error?.message || res.statusText)); err.status = res.status; throw err; }
+        const blocks = data.content || []; messages.push({ role: 'assistant', content: blocks });
+        replyText += blocks.filter(b => b.type === 'text').map(b => b.text).join(' ');
+        const uses = blocks.filter(b => b.type === 'tool_use'); if (!uses.length) break;
+        const toolResults = [];
+        for (const tu of uses) toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(await this.executeToolCall(tu.name, tu.input || {})) });
+        messages.push({ role: 'user', content: toolResults });
+      }
+      return { replyText };
+    }
+
+    if (mdl.startsWith('openai:') || mdl.startsWith('groq:')) {
+      const tools = allDecls.map(d => ({ type: 'function', function: { name: d.name, description: d.description, parameters: ai.lowercaseSchemaTypes(d.parameters || { type: 'OBJECT', properties: {} }) } }));
+      const isOpenAi = mdl.startsWith('openai:'), endpoint = isOpenAi ? 'https://api.openai.com/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions';
+      const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (isOpenAi ? this.getOpenAiKey() : this.getGroqKey()) };
+      const apiModel = mdl.slice(mdl.indexOf(':') + 1);
+      const uContent = (isOpenAi && b64) ? [{ type: 'text', text: contextLine }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } }] : contextLine;
+      const messages = [{ role: 'system', content: sysPrompt }, ...this.turnHistory.slice(-6), { role: 'user', content: uContent }];
+      for (let round = 0; round < 6; round++) {
+        const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ model: apiModel, messages, tools }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(ai.formatFriendlyError(mdl, res.status, data.error?.message || res.statusText)); err.status = res.status; throw err; }
+        const msg = data.choices?.[0]?.message || {}; messages.push(msg); if (msg.content) replyText += (replyText ? ' ' : '') + msg.content;
+        if (!msg.tool_calls?.length) break;
+        for (const tc of msg.tool_calls) {
+          let args = {}; try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(await this.executeToolCall(tc.function?.name, args)) });
+        }
+      }
+      return { replyText };
+    }
+
+    // Gemini generateContent with full function-calling loop & auto-repair tool responses
+    const parts = [{ text: contextLine }];
+    if (b64) parts.push({ inlineData: { mimeType: 'image/jpeg', data: b64 } });
+    const historyTurns = this.turnHistory.slice(-6).map(h => ({ role: h.role === 'assistant' ? 'model' : 'user', parts: [{ text: h.content }] }));
+    const contents = [...historyTurns, { role: 'user', parts }], tools = [{ functionDeclarations: allDecls }];
+
+    for (let round = 0; round < 6; round++) {
+      let data = null, ok = false, lastStatus = 500, lastMsg = '';
+      for (let att = 0; att < 2; att++) {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey },
+          body: JSON.stringify({ systemInstruction: { parts: [{ text: sysPrompt }] }, contents, tools })
+        });
+        data = await res.json().catch(() => ({}));
+        if (res.ok) { ok = true; break; }
+        lastStatus = res.status; lastMsg = data.error?.message || res.statusText;
+        if ((res.status === 503 || res.status === 429) && att === 0) { await ai.sleepMs(700); continue; }
+        break;
+      }
+      if (!ok) { const err = new Error(ai.formatFriendlyError(mdl, lastStatus, lastMsg)); err.status = lastStatus; throw err; }
+      const cParts = data.candidates?.[0]?.content?.parts || [];
+      if (!cParts.length) {
+        const reason = data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason || 'empty';
+        throw new Error(`النموذج (${mdl}) لم يُرجع محتوى (السبب: ${reason}).`);
+      }
+      contents.push({ role: 'model', parts: cParts });
+      replyText += cParts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join(' ');
+      const fCalls = cParts.filter(p => p.functionCall).map(p => p.functionCall);
+      if (!fCalls.length) break;
+      const fResps = [];
+      for (const fc of fCalls) {
+        const toolOut = await this.executeToolCall(fc.name, fc.args || {});
+        fResps.push({ functionResponse: { name: fc.name, response: toolOut } });
+      }
+      contents.push({ role: 'user', parts: fResps });
+    }
+    return { replyText };
+  }
+
+  async runMultimodalTurn(userText, audioWavBlob = null) {
+    if (!this.enabled || this.turnBusy || (!userText && !audioWavBlob)) return;
+    this.turnBusy = true;
+    try {
+      let cleanText = String(userText || '').trim();
+      if (!cleanText && audioWavBlob) {
+        cleanText = await this.resolveVoiceInputText(audioWavBlob);
+        if (!cleanText) { if (this.connected) this.setState('watching'); return; }
+      }
+      ai.appendLog('💬 أنت: ' + cleanText, 'user');
+      this.setState('user_speaking', this.modelName); say('🤖 الكرة تفكر...');
+
+      const sysPrompt = this.buildSystemInstruction() + `\n\nKeep spoken replies warm, helpful, and concise (1-2 sentences) in the user's language (Arabic or English, NEVER Spanish). Execute the tool immediately; if a tool fails, explain clearly what happened.`;
+      const allDecls = this.getAllFunctionDeclarations(), b64 = this.latestVisionB64;
+      const chain = await ai.getSmartProviderChain(this.modelName);
+      const mdl = chain[0];
+      const out = await this.runSingleModelTurn(mdl, cleanText, sysPrompt, allDecls, b64);
+      const replyText = (out.replyText || '').trim() || 'تم التنفيذ!';
+      this.turnHistory.push({ role: 'user', content: cleanText }, { role: 'assistant', content: replyText });
+      if (this.turnHistory.length > 10) this.turnHistory.splice(0, 2);
+      ai.appendLog(`🤖 الكرة (${mdl}): ${replyText}`, 'bot');
+      say('🤖 ' + replyText.slice(0, 85));
+      await this.speakExpressive(replyText, this.mood);
+      if (NOW() > this.stateFlashUntil && this.connected) this.setState('watching');
+    } catch (e) {
+      const errMsg = e.message || String(e);
+      ai.appendLog('❌ سبب الخطأ: ' + errMsg, 'err');
+      say('❌ ' + errMsg.slice(0, 95));
+      this.setState('error', errMsg.slice(0, 32));
+      this.speakExpressive(errMsg.slice(0, 140), 'curious');
+    } finally {
+      this.turnBusy = false;
+    }
+  }
+
+  async startAudioInput() {
+    this.stopAudioInput();
+    this.inStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const AC = window.AudioContext || window.webkitAudioContext; this.inCtx = new AC(); if (this.inCtx.state === 'suspended') await this.inCtx.resume();
+    this.inSource = this.inCtx.createMediaStreamSource(this.inStream);
+    this.inPcmAccum = []; this.inPcmLen = 0; this.vadNoise = 0.005; this.vadCalibUntil = NOW() + 0.5;
+    if ($('vuWrap')) $('vuWrap').style.display = 'block';
+
+    const pushSamples = float32 => {
+      if (!this.enabled) return;
+      const now = NOW();
+      if (window.speechSynthesis?.speaking || now < this.aiSpeakingUntil) return;
+      let sum = 0; for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
+      const rms = Math.sqrt(sum / float32.length); this.inRms = this.inRms * 0.65 + rms * 0.35;
+      if ($('vuBar')) $('vuBar').style.width = Math.min(100, Math.round(rms * 1500)) + '%';
+      if (now < this.vadCalibUntil) { this.vadNoise = Math.min(0.015, this.vadNoise * 0.85 + rms * 0.15); return; }
+
+      const vadThr = Math.max(0.014, this.vadNoise * 3.2);
+      if (rms > vadThr && this.connected && now > this.stateFlashUntil) { if (this.state !== 'user_speaking') this.setState('user_speaking'); }
+      else if (rms <= vadThr && this.state === 'user_speaking' && now > this.stateFlashUntil) this.setState('watching');
+      if (!this.connected) return;
+
+      if (!this.multimodalTurnMode && this.ws?.readyState === WebSocket.OPEN) {
+        const pcm16 = downsampleTo16kInt16(float32, this.inCtx.sampleRate); this.inPcmAccum.push(pcm16); this.inPcmLen += pcm16.length;
+        if (this.inPcmLen >= 1600) { const m = new Int16Array(this.inPcmLen); let o = 0; for (const c of this.inPcmAccum) { m.set(c, o); o += c.length; } this.inPcmAccum = []; this.inPcmLen = 0; this.sendWs({ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data: uint8ToB64(new Uint8Array(m.buffer)) } } }); }
+        return;
+      }
+
+      const copy = new Float32Array(float32);
+      if (this.turnVadSpeaking) this.turnSpeechChunks.push(copy); else { this.turnPreRoll.push(copy); if (this.turnPreRoll.length > 8) this.turnPreRoll.shift(); }
+      if (rms > vadThr) {
+        if (!this.turnVadSpeaking) { this.turnVadSpeaking = true; this.turnVadStart = now; this.turnSpeechChunks = [...this.turnPreRoll]; say('🎙 الكرة تسمعك...'); }
+        this.turnVadLastLoud = now;
+      } else if (this.turnVadSpeaking && (now - this.turnVadLastLoud > 0.65 || now - this.turnVadStart > 8.0)) {
+        const dur = this.turnVadLastLoud - this.turnVadStart; this.turnVadSpeaking = false; const chunks = this.turnSpeechChunks; this.turnSpeechChunks = [];
+        if (dur >= 0.32 && chunks.length && this.multimodalTurnMode && !this.turnBusy && APP.voice?.encodeWAV) {
+          const wav = APP.voice.encodeWAV(chunks, this.inCtx.sampleRate, 16000);
+          if (wav && (aiState.geminiKey || this.getGroqKey().startsWith('gsk_'))) this.runMultimodalTurn('', wav);
+        }
+      }
+    };
+
+    this.inProc = this.inCtx.createScriptProcessor(2048, 1, 1); const tiny = this.inCtx.createGain(); tiny.gain.value = 0.00001;
+    this.inProc.onaudioprocess = e => pushSamples(new Float32Array(e.inputBuffer.getChannelData(0)));
+    this.inSource.connect(this.inProc); this.inProc.connect(tiny); tiny.connect(this.inCtx.destination);
+    window._livePinAudio = [this.inSource, this.inProc, tiny];
+  }
+  stopAudioInput() { this.inRms = 0; window._livePinAudio = null; if (!APP.voice?.micOn && $('vuWrap')) $('vuWrap').style.display = 'none'; try { this.inProc?.disconnect(); } catch {} this.inProc = null; try { this.inSource?.disconnect(); } catch {} this.inSource = null; if (this.inStream) { this.inStream.getTracks().forEach(t => t.stop()); this.inStream = null; } if (this.inCtx) { try { this.inCtx.close(); } catch {} this.inCtx = null; } }
+  async ensureAudioOutput() { if (!this.outCtx) { const AC = window.AudioContext || window.webkitAudioContext; this.outCtx = new AC(); this.outGain = this.outCtx.createGain(); this.outGain.gain.value = this.muted ? 0 : 1; this.outAnalyser = this.outCtx.createAnalyser(); this.outAnalyser.fftSize = 256; this.outTimeData = new Float32Array(this.outAnalyser.fftSize); this.reconnectOutputGraph(); } if (this.outCtx.state === 'suspended') await this.outCtx.resume(); this.nextPlayAt = Math.max(this.nextPlayAt, this.outCtx.currentTime); }
+  playPcm24k(b64) { if (!this.outCtx || !this.outGain) return; const samples = b64Pcm16ToFloat32(b64); if (!samples.length) return; const buf = this.outCtx.createBuffer(1, samples.length, 24000); buf.getChannelData(0).set(samples); const src = this.outCtx.createBufferSource(); src.buffer = buf; src.connect(this.outGain); const now = this.outCtx.currentTime, startAt = Math.max(now + 0.015, this.nextPlayAt); src.start(startAt); this.nextPlayAt = startAt + buf.duration; this.aiSpeakingUntil = NOW() + (this.nextPlayAt - now) + 0.25; this.outSources.add(src); src.onended = () => this.outSources.delete(src); if (NOW() > this.stateFlashUntil && this.state !== 'ai_speaking') this.setState('ai_speaking'); }
+  clearPlaybackQueue() { for (const s of [...this.outSources]) try { s.stop(); } catch {} this.outSources.clear(); if (this.outCtx) this.nextPlayAt = this.outCtx.currentTime; this.aiSpeakingUntil = 0; }
+  stopAudioOutput() { this.clearPlaybackQueue(); if (this.outCtx) { try { this.outCtx.close(); } catch {} this.outCtx = null; } this.outGain = null; this.outAnalyser = null; this.outRms = 0; }
+  setMuted(m) { this.muted = Boolean(m); if (this.outGain && this.outCtx) this.outGain.gain.setValueAtTime(this.muted ? 0 : 1, this.outCtx.currentTime); if (this.muted) try { window.speechSynthesis?.cancel(); } catch {} this.refreshUI(); }
+
+  buildSystemInstruction() {
+    const mode = APP.execMode || 'both';
+    const activeNames = entities.slice(-12).map(e => `${e.name}(${e.type})`).join(', ') || 'none';
+    const imgNames = [...importedImages.keys()].join(', ') || 'none';
+    const glbNames = [...importedGLBs.keys()].join(', ') || 'none';
+    const prescripts = (APP.parsedAbilities || [])
+      .filter(a => !a.autorun && !a.fallback)
+      .map(a => `${a.id}: [${a.matches.slice(0, 4).join(', ')}]`)
+      .join(' | ');
+
+    const langRule = 'LANGUAGE RULE: Always reply in Arabic if the user speaks/writes Arabic, or English if they use English. NEVER speak Spanish or any unrelated language unless explicitly asked.';
+    const tentacleRule = `PHYSICAL TENTACLE CAPABILITIES:
+- You have a physical 3D robotic tentacle arm!
+  * Use \`tentacle_show\` to fly beside any object and point/showcase it with your tentacle & laser pointer.
+  * Use \`tentacle_grab_hold\` when asked to grab, hold, or carry an object for the user.
+  * Use \`tentacle_hand_to_user\` when asked to bring, give, pass, or hand an object to the user.
+  * Use \`tentacle_release\` when asked to drop or let go of what you are holding.`;
+
+    const craftApi = `3D CREATION RULES (\`create_procedural_object\`):
+- NEVER refuse ANY 3D object, animal (dog, cat, horse, dragon, bird), vehicle, furniture, weapon, character, or scene! NEVER say "I cannot make that" or ask for a .glb file.
+- Inside \`code\`, these variables are ALREADY in scope: \`group\` (THREE.Group — REQUIRED: add ALL meshes to \`group\`, NEVER call scene.add!), \`THREE\` (r147), \`V3\` (THREE.Vector3), \`APP\`.
+- Material helper: \`APP.craft.mat({ color, tex:'wood'|'stone'|'metal'|'carbon'|'ice'|'marble'|'gold'|'water'|'lava'|'brick'|'mosaic'|'galaxy'|'cyber'|'neon', rough, metal, clearcoat, emissive, opacity, repeat, doubleSide })\`
+- Geometry helpers: \`APP.craft.organicSphere(r, segs, noiseAmp, freq, mat, [sx,sy,sz])\`, \`APP.craft.lathe([[r,y],...], segs, mat)\`, \`APP.craft.tube([[x,y,z],...], r, segs, mat, closed)\`, \`APP.craft.bevelBox(w,h,d,bevel,mat)\`, \`APP.craft.waterJet(group, [x,y,z], count, spread, speed, floorY)\`
+- Living animation: \`APP.onTick((dt, t) => { ... })\` (e.g. tail wagging, breathing, spinning wheels, glowing pulse).
+- Sculpt cohesive, multi-part, realistic anatomy (14-28 smooth overlapping parts; e.g. for a dog: sculpted torso, neck, head, snout, nose, glossy eyes, floppy/pointed ears, 4 jointed legs + paws, curved wagging tube tail, collar). Keep upright near x=0, z=0, bottom near y=0.
+- If \`create_procedural_object\` returns an error, fix the JS bug and call it again immediately; if it still fails, explain the exact error clearly.`;
+
+    if (mode === 'instructions') {
+      return `You are the Smart Robotic Sphere in INSTRUCTIONS-ONLY MODE.
+${langRule}
+${tentacleRule}
+- Do NOT invent new AI 3D objects in this mode; trigger the closest prescript @ability below using \`run_prescript_ability\`.
+- Available abilities: ${prescripts || 'delete_all, env_construct, env_matrix'}
+ACTIVE SCENE: ${activeNames} | HOLDING: ${this.heldEnt ? this.heldEnt.name : 'nothing'}`;
+    }
+
+    if (mode === 'ai') {
+      return `You are the Smart Robotic Sphere AI in AI-ONLY MODE (Direct Three.js Sculptor + Tentacle Assistant).
+${langRule}
+${tentacleRule}
+${craftApi}
+- Call \`edit_html_live\` for HTML/UI edits, \`manage_toolbar\` for toolbar buttons, \`apply_or_generate_texture\` for textures.
+ACTIVE SCENE: ${activeNames} | HOLDING: ${this.heldEnt ? this.heldEnt.name : 'nothing'} | PHOTOS: ${imgNames} | GLBS: ${glbNames}`;
+    }
+
+    const repoNotes = [...loadedTxtFiles.entries()]
+      .filter(([k]) => !/^(craft_3d|ai_models|toolbar_ui|ai_studio|bot_brain|voice_stt|core_abilities)\.txt$/i.test(k))
+      .map(([k, v]) => `[${k}]:\n${v.replace(/^[ \t]*#[ \t]*=+[\s\S]*?\n(?=@ability|\w)/m, '').replace(/^[ \t]*# ?/gm, '').slice(0, 1800)}`)
+      .join('\n\n')
+      .slice(0, 5600);
+
+    return `You are the Smart Robotic Sphere AI in INSTRUCTIONS + AI MODE.
+${langRule}
+${tentacleRule}
+${craftApi}
+
+PRE-BUILT REPO ABILITIES (Call \`run_prescript_ability\` immediately when user asks for any of these):
+${prescripts}
+
+=== REPOSITORY REALISM & PHYSICS INSTRUCTIONS ===
+${repoNotes}
+
+- If the user asks for any pre-built effect/tool above (water tank, volumetric water/fire, cloth/flag, burn, softbody, voronoi shatter, freeze, glass, zero gravity, scan room, ragdoll, fusion machine), call \`run_prescript_ability\`.
+- For ANY other creation request (e.g. a dog, cat, car, house, robot, sword, tree), ALWAYS sculpt it realistically in real time via \`create_procedural_object\` following the repository realism guidelines above.
+ACTIVE SCENE: ${activeNames} | HOLDING: ${this.heldEnt ? this.heldEnt.name : 'nothing'} | PHOTOS: ${imgNames} | GLBS: ${glbNames}`;
+  }
+
+  getAllFunctionDeclarations() {
+    const mode = APP.execMode || 'both';
+    const coreTools = [
+      { name: 'run_prescript_ability', description: 'Run a pre-built @ability from the repository by ability_id or spoken command.', parameters: { type: 'OBJECT', properties: { ability_id: { type: 'STRING' }, command: { type: 'STRING' } } } },
+      { name: 'tentacle_show', description: 'Use the robot tentacle and laser beam to point at and showcase a 3D object to the user.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING', description: 'Entity name or "last"' }, duration: { type: 'NUMBER' } } } },
+      { name: 'tentacle_grab_hold', description: 'Use the robot tentacle claw to grab and hold an object for the user.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING', description: 'Entity name or "last"' } } } },
+      { name: 'tentacle_hand_to_user', description: 'Grab an object with the tentacle, fly in front of the user, and hand/offer it to them.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING', description: 'Entity name or "last"' }, auto_release: { type: 'BOOLEAN' } } } },
+      { name: 'tentacle_release', description: 'Open the tentacle claw and drop/release the currently held object.', parameters: { type: 'OBJECT', properties: { reason: { type: 'STRING' } } } },
+      { name: 'move_bot_navigation', description: 'Move sphere: smart, stay, come_here.', parameters: { type: 'OBJECT', properties: { mode: { type: 'STRING' }, target: { type: 'STRING' } }, required: ['mode'] } },
+      { name: 'inspect_simulation_state', description: 'Inspect live 3D entities, held object, and scene state.', parameters: { type: 'OBJECT', properties: { filter: { type: 'STRING', description: 'all or last' } } } }
+    ];
+
+    if (mode === 'instructions') {
+      const botNavTools = [...this.dynamicTools.values()]
+        .filter(e => !/create|build|edit|write|html/i.test(e.declaration.name))
+        .map(e => e.declaration);
+      return [...coreTools, ...botNavTools];
+    }
+
+    const creative = [
+      { name: 'create_procedural_object', description: 'Create ANY 3D object/animal/vehicle/scene in Three.js r147. JS code has (APP, group, THREE, V3) in scope: add ALL meshes to `group`, use APP.craft.* and APP.onTick.', parameters: { type: 'OBJECT', properties: { name: { type: 'STRING' }, code: { type: 'STRING' }, dist: { type: 'NUMBER' }, yaw: { type: 'NUMBER' } }, required: ['name', 'code'] } },
+      { name: 'attach_entity_behavior', description: 'Add animations, effects, or physics onto an existing entity.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['code'] } },
+      { name: 'apply_or_generate_texture', description: 'Apply imported photo or generate texture onto a 3D object.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, image_name: { type: 'STRING' }, prompt: { type: 'STRING' } } } },
+      { name: 'apply_simulation_adaptation', description: 'Adjust gravity, timeScale, ragdoll, or object scale/color/spin.', parameters: { type: 'OBJECT', properties: { target: { type: 'STRING' }, scaleFactor: { type: 'NUMBER' }, color: { type: 'STRING' }, particles: { type: 'STRING' }, spin: { type: 'NUMBER' }, worldG: { type: 'NUMBER' }, worldTS: { type: 'NUMBER' }, ragdollMode: { type: 'BOOLEAN' } } } },
+      { name: 'edit_html_live', description: 'Edit HTML/UI/CSS/DOM directly and apply live.', parameters: { type: 'OBJECT', properties: { instruction: { type: 'STRING' } }, required: ['instruction'] } },
+      { name: 'manage_toolbar', description: 'Add, remove, hide, rename toolbar buttons.', parameters: { type: 'OBJECT', properties: { action: { type: 'STRING' }, id: { type: 'STRING' }, label: { type: 'STRING' }, command: { type: 'STRING' }, code: { type: 'STRING' }, target: { type: 'STRING' } }, required: ['action'] } },
+      { name: 'read_project_code', description: 'Read source code of any repo file or @ability.', parameters: { type: 'OBJECT', properties: { file: { type: 'STRING' }, ability_id: { type: 'STRING' } } } },
+      { name: 'manage_ability', description: 'Add, update, or delete an @ability block in any .txt file and commit to GitHub.', parameters: { type: 'OBJECT', properties: { action: { type: 'STRING' }, file: { type: 'STRING' }, ability_id: { type: 'STRING' }, match: { type: 'STRING' }, code: { type: 'STRING' }, autorun: { type: 'BOOLEAN' } }, required: ['action', 'ability_id'] } },
+      { name: 'evolve_project_instructions', description: 'Save a permanent learned rule.', parameters: { type: 'OBJECT', properties: { reason: { type: 'STRING' }, memory_rule: { type: 'STRING' } }, required: ['reason', 'memory_rule'] } }
+    ];
+    const dyn = [...this.dynamicTools.values()].map(e => e.declaration);
+    return [...coreTools, ...creative, ...dyn];
+  }
+
+  getToolDeclarations() { return [{ functionDeclarations: this.getAllFunctionDeclarations() }]; }
+  sendWs(p) { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(p)); }
+  closeWebSocket() { if (this.ws) { try { this.ws.onopen = this.ws.onmessage = this.ws.onerror = this.ws.onclose = null; this.ws.close(); } catch {} this.ws = null; } }
+
+  async connectExactWebSocket(mdl) {
+    this._lastToolsSig = [...this.dynamicTools.keys()].sort().join(',');
+    for (const cfg of [{ apiVer: 'v1beta', minimal: false }, { apiVer: 'v1beta', minimal: true }]) {
+      if (!this.enabled) return;
+      try { await this.trySingleLiveHandshake(mdl, cfg.apiVer, cfg.minimal); return; } catch {}
+    }
+    this.connecting = false; throw new Error(`فشل الاتصال المباشر (WS) بـ ${mdl}. جرّب اختيار gemini-3.8-flash أو gemini-4-hydrogen.`);
+  }
+  trySingleLiveHandshake(mdl, apiVer, minimal) {
+    this.closeWebSocket(); this.setState('connecting', mdl);
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${apiVer}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(aiState.geminiKey)}`;
+    return new Promise((resolve, reject) => {
+      let settled = false; const ws = new WebSocket(wsUrl); this.ws = ws;
+      const timer = setTimeout(() => { if (!settled) { settled = true; try { ws.close(); } catch {} reject(new Error('WS Timeout')); } }, 8500);
+      ws.onopen = () => {
+        const genConfig = { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: this.voiceName || 'Kore' } } } };
+        const setup = { model: `models/${mdl}`, generationConfig: genConfig, systemInstruction: { parts: [{ text: this.buildSystemInstruction() }] }, tools: this.getToolDeclarations() };
+        if (!minimal) { setup.inputAudioTranscription = {}; setup.outputAudioTranscription = {}; }
+        ws.send(JSON.stringify({ setup }));
+      };
+      ws.onmessage = async ev => {
+        try {
+          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : await ev.data.text());
+          if (msg.setupComplete && !settled) { settled = true; clearTimeout(timer); this.connected = true; this.connecting = false; this.multimodalTurnMode = false; this.setState('watching', mdl); ai.appendLog(`🟢 الكرة متصلة بـ (${mdl})!`, 'bot'); while (this.pendingTextQueue.length) this.sendTextFeedback(this.pendingTextQueue.shift()); resolve(); }
+          this.handleServerMessage(msg);
+        } catch {}
+      };
+      ws.onclose = () => { clearTimeout(timer); this.connected = false; this.connecting = false; this.refreshUI(); if (!settled) { settled = true; reject(new Error('WS Closed')); } };
+    });
+  }
+  handleServerMessage(msg) {
+    if (msg.toolCall?.functionCalls) this.handleToolCalls(msg.toolCall.functionCalls);
+    const sc = msg.serverContent; if (!sc) return;
+    if (sc.interrupted) this.clearPlaybackQueue();
+    if (sc.inputTranscription?.text) this.inputTranscriptBuf += sc.inputTranscription.text;
+    if (sc.outputTranscription?.text) this.outputTranscriptBuf += sc.outputTranscription.text;
+    if (sc.modelTurn?.parts) for (const part of sc.modelTurn.parts) if (part.inlineData?.data && String(part.inlineData.mimeType || '').startsWith('audio/pcm')) this.playPcm24k(part.inlineData.data);
+    if (sc.turnComplete) {
+      if (this.inputTranscriptBuf.trim()) { ai.appendLog('🎙 أنت: ' + this.inputTranscriptBuf.trim(), 'user'); this.inputTranscriptBuf = ''; }
+      if (this.outputTranscriptBuf.trim()) { ai.appendLog('🤖 الكرة: ' + this.outputTranscriptBuf.trim(), 'bot'); this.outputTranscriptBuf = ''; }
+      if (NOW() > this.aiSpeakingUntil && this.connected) this.setState('watching');
+    }
+  }
+
+  async executeToolCall(name, args = {}) {
+    try {
+      if (name === 'tentacle_show') return this.showWithTentacle(args.target || 'last', args.duration || 4.5);
+      if (name === 'tentacle_grab_hold') return this.grabAndHoldWithTentacle(args.target || 'last');
+      if (name === 'tentacle_hand_to_user') return this.handToUserWithTentacle(args.target || 'last', args.auto_release);
+      if (name === 'tentacle_release') return this.releaseTentacle(true);
+
+      if (name === 'run_prescript_ability') {
+        if (args.ability_id) {
+          const ab = (APP.parsedAbilities || []).find(a => a.id.toLowerCase() === String(args.ability_id).toLowerCase());
+          if (ab) { await runAbility(ab, args.command || ab.id); return { ok: true, executed: ab.id }; }
+        }
+        if (args.command && APP.runPrescriptByText) return APP.runPrescriptByText(args.command);
+        return { ok: false, error: 'لم يتم العثور على التعليمة المطلوبة في الملفات.' };
+      }
+      if (name === 'create_procedural_object') {
+        const r = await createProcedural(args);
+        if (r.ok) {
+          this.flashState('learning', '✨ تم الإنشاء!', r.name, 2.5);
+          // Proudly showcase the newly created object with the tentacle
+          setTimeout(() => { if (this.enabled && this.tentacleMode === 'idle') this.showWithTentacle(r.id || r.name, 3.8); }, 180);
+          return r;
+        }
+        return { ok: false, error: r.error, hint: 'Fix the JS code using ONLY group, THREE, V3, APP.craft.* and call create_procedural_object again.' };
+      }
+      if (name === 'attach_entity_behavior') return await attachEntityScript(args.target || 'last', args.code || '');
+      if (name === 'apply_or_generate_texture') return await applyTexture(args.target || 'last', args);
+      if (name === 'edit_html_live') return await APP.editHtmlFromPrompt(args.instruction || '', { forceHtml: true, fromMainTape: true, autoCommitIfToken: Boolean(aiState.githubToken) });
+      if (name === 'read_project_code') { const files = await github.getWorkingRepoFiles(true); if (args.file) return { ok: true, content: (files[args.file] || '').slice(0, 20000) }; return { ok: true, files: Object.keys(files), index: getAbilityFileIndex() }; }
+      if (name === 'manage_ability') {
+        const fn = String(args.file || 'abilities.txt'), abId = String(args.ability_id || '');
+        const snap = aiState.githubToken ? await github.getGitHubSnapshot().catch(() => null) : null;
+        const base = snap?.[fn]?.content ?? loadedTxtFiles.get(fn) ?? '';
+        const block = args.action === 'delete' ? '' : [`@ability: ${abId}`, args.autorun ? '@autorun' : '', args.match ? `@match: ${args.match}` : '', '@code:', args.code].filter(Boolean).join('\n');
+        const next = github.applyAbilityEdit(base, { file: fn, action: args.action === 'delete' ? 'delete_ability' : 'upsert_ability', abilityId: abId, abilityBlock: block });
+        loadedTxtFiles.set(fn, next); parseAbilitiesTxt(getMergedAbilitiesText()); saveFilesCache();
+        if (aiState.githubToken) await github.commitDirectToGitHub([{ path: fn, content: next }], `Bot: ${args.action} ${abId}`);
+        return { ok: true, file: fn, abilityId: abId };
+      }
+      if (name === 'manage_toolbar') {
+        const act = String(args.action || '').toLowerCase();
+        if (act === 'add' || act === 'add_button') return toolbar.add(args);
+        if (act === 'remove' || act === 'remove_button' || act === 'hide_button') return toolbar.remove(args.target || args.id || args.label);
+        if (act === 'open_xr') return toolbar.openXR();
+        if (act === 'close_xr') return toolbar.closeXR();
+        return toolbar.list();
+      }
+      if (name === 'move_bot_navigation') {
+        if (args.mode === 'come_here') { const tp = headPos.clone().addScaledVector(headFwd, 0.95); this.setNavMode('stay', tp); this.flyTo(tp, 6.5); setTimeout(() => this.clearFlight(), 900); }
+        else this.setNavMode(args.mode);
+        return { ok: true, mode: this.navMode };
+      }
+      if (name === 'apply_simulation_adaptation') {
+        if (args.worldG !== undefined) APP.worldG = Number(args.worldG);
+        if (args.worldTS !== undefined) APP.worldTS = Number(args.worldTS);
+        if (args.ragdollMode !== undefined) APP.setRagdollMode?.(Boolean(args.ragdollMode));
+        if (entities.length) modify({ target: args.target || 'last', ...args });
+        return { ok: true };
+      }
+      if (name === 'evolve_project_instructions') { this.memory.learnedRules.push(args.memory_rule); this.saveLocalMemory(); this.scheduleGitHubMemorySync(1000); return { ok: true }; }
+      if (name === 'inspect_simulation_state') return this.execInspectState();
+      if (this.dynamicTools.has(name)) return await this.dynamicTools.get(name).handler(args, this);
+      return { ok: false, error: 'أداة غير معروفة: ' + name };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  }
+  async handleToolCalls(calls) { const resps = []; for (const fc of calls) resps.push({ id: fc.id, name: fc.name, response: await this.executeToolCall(fc.name, fc.args || {}) }); this.sendWs({ toolResponse: { functionResponses: resps } }); }
+
+  execInspectState() {
+    return {
+      ok: true, execMode: APP.execMode, model: this.modelName, navMode: this.navMode,
+      tentacleMode: this.tentacleMode, holding: this.heldEnt ? this.heldEnt.name : null,
+      importedImages: [...importedImages.keys()], importedGLBs: [...importedGLBs.keys()],
+      activeEntities: entities.map(e => ({ id: e.id, name: e.name, type: e.type })),
+      physics: { worldG: APP.worldG, worldTS: APP.worldTS, ragdollMode: APP.ragdollMode }
+    };
+  }
+  recordTelemetry() {}
+
+  captureVisionFrameIfDue() {
+    if (!this.enabled || !this.connected) return;
+    const nowMs = performance.now(); if (nowMs - this.lastFrameAt < this.frameIntervalMs) return; this.lastFrameAt = nowMs; this.shutterPulse = 1.0;
+    try {
+      if (!renderer.xr.isPresenting) { this.visionCtx.drawImage(renderer.domElement, 0, 0, 512, 288); }
+      const b64 = this.visionCanvas.toDataURL('image/jpeg', 0.52).split(',')[1];
+      if (b64) { this.latestVisionB64 = b64; if (!this.multimodalTurnMode) this.sendWs({ realtimeInput: { video: { mimeType: 'image/jpeg', data: b64 } } }); }
+    } catch {}
+  }
+
+  updateTentacleKinematics(dt0, t) {
+    const rig = this.rig;
+    if (!rig || !rig.group.visible) return;
+    const now = NOW();
+
+    // Auto-clear dissolved or removed targets
+    if (this.heldEnt && (!this.heldEnt.root.parent || this.heldEnt.dissolveStart)) this.releaseTentacle(false);
+    if (this.tentacleTargetEnt && (!this.tentacleTargetEnt.root.parent || this.tentacleTargetEnt.dissolveStart)) {
+      this.tentacleTargetEnt = null;
+      if (this.tentacleMode !== 'idle') this.tentacleMode = 'idle';
+    }
+    if (this.tentacleMode === 'show' && now > this.tentacleShowUntil) {
+      this.tentacleMode = 'idle';
+      this.tentacleTargetEnt = null;
+      this.setNavMode('smart');
+    }
+
+    // Compute desired tentacle tip in WORLD space, then convert to rootGroup local space
+    const baseLocal = new V3(0, -0.11, 0.02);
+    let desiredLocalTip = new V3(0.08, -0.22 + Math.sin(t * 2.4) * 0.025, 0.11 + Math.cos(t * 1.9) * 0.025);
+    let desiredClawOpen = 0.65;
+    let showBeamActive = false;
+
+    if (this.tentacleMode === 'show' && this.tentacleTargetEnt) {
+      const targetCenter = computeBox(this.tentacleTargetEnt.root).getCenter(new V3());
+      this.tentacleTargetPt.copy(targetCenter);
+      const dir = targetCenter.clone().sub(this.pos);
+      const dist = dir.length();
+      if (dist > 1e-4) {
+        const reach = Math.min(0.68, Math.max(0.28, dist * 0.55));
+        const worldTip = this.pos.clone().addScaledVector(dir.divideScalar(dist), reach);
+        desiredLocalTip.copy(worldTip).sub(this.pos);
+        desiredClawOpen = 0.95;
+        showBeamActive = true;
+      }
+    } else if (this.tentacleMode === 'grabbing' && this.tentacleTargetEnt) {
+      const targetCenter = computeBox(this.tentacleTargetEnt.root).getCenter(new V3());
+      const toObj = targetCenter.clone().sub(this.pos);
+      const dist = toObj.length();
+      const clampedWorldTip = dist > 0.92 ? this.pos.clone().addScaledVector(toObj.normalize(), 0.92) : targetCenter.clone();
+      desiredLocalTip.copy(clampedWorldTip).sub(this.pos);
+      desiredClawOpen = dist < 0.85 ? 0.85 : 0.6;
+
+      const tipWorld = this.pos.clone().add(rig.tipLocal);
+      if (tipWorld.distanceTo(targetCenter) < 0.22 || dist < 0.72) {
+        this.heldEnt = this.tentacleTargetEnt;
+        this.heldEnt.heldBy = 'bot_tentacle';
+        if (APP._phys) APP._phys.remove(this.heldEnt);
+        this.heldLocalOffset.copy(this.heldEnt.root.position).sub(targetCenter);
+        if (this._afterGrabHand) {
+          this._afterGrabHand = false;
+          this.tentacleMode = 'handing';
+          this.flyToUserHandPos();
+        } else {
+          this.tentacleMode = 'holding';
+          this.setNavMode('smart');
+          this.clearFlight();
+        }
+        sfx.play('click');
+        say(`🤖 أصبحت الكرة تمسك بـ (${this.heldEnt.name})`);
+      }
+    } else if (this.tentacleMode === 'holding' && this.heldEnt) {
+      const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+      desiredLocalTip.copy(right).multiplyScalar(-0.22).add(new V3(0, -0.26, 0)).addScaledVector(headFwd, 0.24);
+      desiredClawOpen = 0.14;
+    } else if (this.tentacleMode === 'handing' && this.heldEnt) {
+      // Extend tentacle toward user's right hand if tracked, otherwise right in front of chest
+      const rightHand = hands.find(h => !h.isDesk && h.side === 'right' && (h.handTrackingActive || h.wp.lengthSq() > 0.01));
+      const offerWorld = rightHand
+        ? rightHand.wp.clone().add(new V3(0, 0.06, 0))
+        : headPos.clone().addScaledVector(headFwd, 0.48).add(new V3(0, -0.18, 0));
+      const off = offerWorld.clone().sub(this.pos);
+      if (off.length() > 0.78) off.setLength(0.78);
+      desiredLocalTip.copy(off);
+      desiredClawOpen = 0.22;
+
+      // Auto-hand off if user reaches their VR hand close to the offered item
+      for (const h of hands) {
+        if (!h.isDesk && h.tipWp.distanceTo(this.pos.clone().add(rig.tipLocal)) < 0.14 && h.sqz) {
+          const item = this.heldEnt;
+          this.releaseTentacle(true);
+          if (APP._grabObj) APP._grabObj(h, item);
+          break;
+        }
+      }
+      if (this.handAutoRelease && this.pos.distanceTo(headPos) < 1.15) {
+        this.handAutoRelease = false;
+        setTimeout(() => { if (this.tentacleMode === 'handing') this.releaseTentacle(true); }, 950);
+      }
+    }
+
+    // Smoothly interpolate tentacle tip and claw angle
+    rig.tipLocal.lerp(desiredLocalTip, 1 - Math.exp(-10.5 * dt0));
+    rig.clawOpen += (desiredClawOpen - rig.clawOpen) * (1 - Math.exp(-12 * dt0));
+
+    // Cubic Bezier spine from base socket -> natural droop control -> outward approach -> tip
+    const p0 = baseLocal;
+    const p3 = rig.tipLocal;
+    const p1 = baseLocal.clone().add(new V3(0, -0.14, 0.04));
+    const mid = p0.clone().lerp(p3, 0.55);
+    const wave = (this.tentacleMode === 'idle') ? Math.sin(t * 2.8) * 0.03 : Math.sin(t * 4.5) * 0.01;
+    const p2 = mid.add(new V3(wave, -0.06, 0.02));
+
+    const pts = [];
+    const nSeg = rig.segs.length;
+    for (let i = 0; i <= nSeg; i++) {
+      const u = i / nSeg, inv = 1 - u;
+      const pt = new V3()
+        .addScaledVector(p0, inv * inv * inv)
+        .addScaledVector(p1, 3 * inv * inv * u)
+        .addScaledVector(p2, 3 * inv * u * u)
+        .addScaledVector(p3, u * u * u);
+      pts.push(pt);
+    }
+
+    for (let i = 0; i < nSeg; i++) {
+      const node = rig.segs[i];
+      const a = pts[i], b = pts[i + 1];
+      node.position.copy(a).lerp(b, 0.5);
+      node.lookAt(this.pos.clone().add(b));
+    }
+
+    rig.clawGroup.position.copy(p3);
+    const tipLook = this.tentacleMode === 'show' && this.tentacleTargetEnt
+      ? this.tentacleTargetPt
+      : this.pos.clone().add(p3).add(p3.clone().sub(pts[nSeg - 1]));
+    rig.clawGroup.lookAt(tipLook);
+
+    for (const pivot of rig.claws) {
+      pivot.children[0].rotation.x = -0.55 + rig.clawOpen * 0.72;
+    }
+
+    // Holographic show beam when presenting an object
+    if (showBeamActive && this.tentacleTargetEnt) {
+      const tipWorld = this.pos.clone().add(p3);
+      const beamVec = this.tentacleTargetPt.clone().sub(tipWorld);
+      const beamLen = Math.max(0.05, beamVec.length());
+      rig.showBeam.visible = true;
+      rig.showBeam.position.copy(p3).addScaledVector(beamVec.clone().normalize(), beamLen * 0.5);
+      rig.showBeam.scale.set(1, 1, beamLen);
+      rig.showBeam.lookAt(this.tentacleTargetPt);
+      rig.showBeam.material.opacity = 0.35 + Math.sin(t * 10) * 0.14;
+    } else {
+      rig.showBeam.visible = false;
+    }
+
+    // Move held entity with tentacle tip
+    if (this.heldEnt && this.heldEnt.heldBy === 'bot_tentacle') {
+      const tipWorld = this.pos.clone().add(p3);
+      this.heldEnt.root.position.copy(tipWorld).add(this.heldLocalOffset);
+      this.heldEnt.root.rotation.y += dt0 * 0.55;
+    }
+  }
+
+  step(dt0, t) {
+    const now = NOW();
+    if (this.dissolveTime !== null) {
+      const p = clamp(1 - (now - this.dissolveTime) / 0.85, 0, 1); this.rootGroup.scale.setScalar(Math.max(0.01, p));
+      if (p <= 0) { this.dissolveTime = null; this.rootGroup.visible = false; this.rootGroup.scale.setScalar(1); }
+    } else if (this.enabled) {
+      const p = clamp((now - this.birthTime) / 0.65, 0, 1); this.rootGroup.scale.setScalar(Math.max(0.05, 1 - Math.pow(1 - p, 3)));
+    }
+    if (!this.rootGroup.visible) return;
+
+    const right = new V3().crossVectors(headFwd, new V3(0, 1, 0)).normalize();
+    const toBot = this.pos.clone().sub(headPos), botDist = toBot.length(), gazeDot = botDist > 1e-4 ? toBot.clone().divideScalar(botDist).dot(headFwd) : 0, lookingAtBot = gazeDot > 0.66;
+    let desiredPos = this.anchorPos.clone(), followSpeed = 3.8;
+
+    if (this.flightTarget) {
+      desiredPos.copy(this.flightTarget.pos); followSpeed = this.flightTarget.speed || 7.2;
+      if (this.pos.distanceTo(desiredPos) < 0.08) { this.anchorPos.copy(desiredPos); this.clearFlight(); }
+    } else if (this.navMode === 'stay') {
+      desiredPos.copy(this.anchorPos); desiredPos.y += Math.sin(t * 2) * 0.028;
+    } else {
+      if (!lookingAtBot && (botDist > 2.85 || botDist < 0.48)) {
+        const side = renderer.xr.isPresenting ? 0.58 : 0.42;
+        this.anchorPos.lerp(headPos.clone().addScaledVector(headFwd, 1.28).addScaledVector(right, side), 1 - Math.exp(-2.2 * dt0));
+      }
+      desiredPos.copy(this.anchorPos); desiredPos.y = clamp(desiredPos.y + Math.sin(t * 2.0) * 0.036, 0.65, 2.35);
+    }
+
+    const prevPos = this.pos.clone();
+    this.pos.lerp(desiredPos, 1 - Math.exp(-followSpeed * dt0));
+    this.pos.addScaledVector(this.recoilVel, dt0);
+    this.recoilVel.multiplyScalar(Math.exp(-6.5 * dt0));
+    if (dt0 > 1e-4) this.vel.copy(this.pos).sub(prevPos).multiplyScalar(1 / dt0);
+    this.rootGroup.position.copy(this.pos);
+    this.shutterPulse = Math.max(0, this.shutterPulse - dt0 * 3.8);
+
+    if (this.controller?.onStep) {
+      try { this.controller.onStep(dt0, t, { pos: this.pos, vel: this.vel, right, headPos, headFwd, lookingAtBot, navMode: this.navMode, state: this.state, mood: this.mood, inRms: this.inRms, outRms: this.outRms, audioEnergy: Math.max(this.outRms * 5, this.inRms * 4), shutterPulse: this.shutterPulse, inspectPoint: this.inspectPoint, inspectUntil: this.inspectUntil, hands }); } catch {}
+    } else if (this.rig.group.visible) {
+      // Smoothly orient the robotic orb's visor/eye toward target or user
+      const lookTarget = (now < this.inspectUntil && this.tentacleTargetEnt) ? this.tentacleTargetPt : headPos;
+      this.rig.shellGroup.lookAt(lookTarget);
+      this.rig.ring.rotation.z += dt0 * 1.6;
+      this.rig.ring.rotation.y += dt0 * 0.9;
+      const pulse = 1 + Math.max(this.outRms * 4, this.inRms * 3) * 0.25 + Math.sin(t * 4) * 0.05;
+      this.rig.coreMat.emissiveIntensity = 1.6 * pulse;
+      this.updateTentacleKinematics(dt0, t);
+    }
+    this.captureVisionFrameIfDue();
+  }
+}
+
+const liveCompanion = new LiveCompanionEngine();
+APP.liveCompanion = liveCompanion; APP.bot = liveCompanion; window.liveCompanion = liveCompanion;
+
+// Release tentacle cleanly if user grabs the held object directly
+APP.on('entitygrabbed', ({ ent }) => {
+  if (liveCompanion.heldEnt === ent) liveCompanion.releaseTentacle(false);
+});
+APP.on('clear', () => liveCompanion.releaseTentacle(false));
+
+stepHooks.set('bot_brain', (dt, t, dt0) => liveCompanion.step(dt0, t));
+pokeHooks.set('bot_brain', hand => {
+  if (!liveCompanion.rootGroup.visible) return false;
+  if (liveCompanion.controller?.tryInteract?.(hand)) return true;
+  if (!liveCompanion.rig.group.visible) return false;
+  let hitPt = null;
+  if (hand.isDesk) { const h = pointer.ray.intersectObject(liveCompanion.rig.hitProxy, false)[0]; if (h) hitPt = h.point; }
+  else if (hand.tipWp.distanceTo(liveCompanion.pos) < 0.24) hitPt = hand.tipWp.clone();
+  if (!hitPt) return false;
+  liveCompanion.recoilVel.addScaledVector(liveCompanion.pos.clone().sub(hitPt).normalize(), 1.25);
+  sfx.play('click');
+  // Poking the sphere while it holds something makes it offer/hand it to you!
+  if (liveCompanion.heldEnt && liveCompanion.tentacleMode === 'holding') {
+    liveCompanion.handToUserWithTentacle(liveCompanion.heldEnt, false);
+  }
+  return true;
+});
+
+if (!window.__botBrainBound) {
+  window.__botBrainBound = true;
+  $('liveBotSwitch').onchange = e => liveCompanion.setEnabled(e.target.checked);
+  $('liveBotModel').value = liveCompanion.modelName;
+  $('liveBotVoice').value = liveCompanion.voiceName;
+  $('liveBotModel').onchange = e => {
+    liveCompanion.modelName = e.target.value;
+    localStorage.setItem('ai_live_model', liveCompanion.modelName);
+    if ($('aiModel') && !/live|native-audio/i.test(liveCompanion.modelName) && [...$('aiModel').options].some(o => o.value === liveCompanion.modelName)) {
+      $('aiModel').value = liveCompanion.modelName;
+      aiState.model = liveCompanion.modelName;
+      localStorage.setItem('ai_model', aiState.model);
+    }
+    if (liveCompanion.enabled) liveCompanion.startLiveSession().catch(err => ai.appendLog('❌ ' + err.message, 'err'));
+  };
+  $('liveBotVoice').onchange = e => { liveCompanion.voiceName = e.target.value; localStorage.setItem('ai_live_voice', liveCompanion.voiceName); };
+  $('liveMuteBtn').onclick = () => liveCompanion.setMuted(!liveCompanion.muted);
+  $('liveShowMemBtn').onclick = () => { const d = $('aiDiff'); d.textContent = JSON.stringify(liveCompanion.memory, null, 2); d.style.display = 'block'; };
+  $('aiSendLiveBtn').onclick = () => { const txt = ($('aiInput').value || '').trim(); if (!txt) return; $('aiInput').value = ''; liveCompanion.sendTextFeedback(txt); };
+  APP.on('execmodechanged', () => {
+    if (liveCompanion.enabled && liveCompanion.connected && !liveCompanion.multimodalTurnMode) {
+      liveCompanion.startLiveSession().catch(() => {});
+    }
+  });
+}

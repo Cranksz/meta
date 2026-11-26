@@ -1,0 +1,321 @@
+@ability: ai_models_module
+@autorun
+@code:
+const { $ } = APP;
+
+const LIVE_MODELS = [
+  ['gemini-4-hydrogen', '🧬 Gemini 4 Hydrogen (مجاني - الأقوى)'],
+  ['gemini-3.8-flash', '⚡ Gemini 3.8 Flash (مجاني - سريع وذكي)'],
+  ['gemini-3.6-flash', '✨ Gemini 3.6 Flash (مجاني)'],
+  ['gemini-3.5-flash-lite', '🪶 Gemini 3.5 Flash-Lite (مجاني خفيف)'],
+  ['groq:openai/gpt-oss-120b', '🚀 Groq GPT-OSS 120B (مجاني)'],
+  ['groq:llama-3.3-70b-versatile', '🦙 Groq Llama 3.3 70B (مجاني)'],
+  ['gemini-2.5-flash-native-audio-preview-12-2025', '🎙 Gemini 2.5 Live Audio (WS)'],
+  ['gemini-3.8-live', '⚡ Gemini 3.8 Live (WS)'],
+  ['openai:gpt-6.2-astra', '💬 ChatGPT: GPT-6.2 Astra'],
+  ['openai:gpt-5.4', '💬 ChatGPT: GPT-5.4'],
+  ['openai:gpt-5-mini', '💬 ChatGPT: GPT-5 Mini'],
+  ['claude:claude-haiku-5-5', '🟠 Claude Haiku 5.5'],
+  ['claude:claude-haiku-4-5', '🟠 Claude Haiku 4.5']
+];
+
+const CODER_MODELS = LIVE_MODELS.filter(([v]) => !/live|native-audio/i.test(v));
+
+function fillSelect(selId, list) {
+  const el = $(selId); if (!el) return;
+  const prev = el.value;
+  el.innerHTML = '';
+  for (const [val, label] of list) {
+    const o = document.createElement('option');
+    o.value = val; o.textContent = label;
+    el.appendChild(o);
+  }
+  if (prev && list.some(([v]) => v === prev)) el.value = prev;
+}
+fillSelect('liveBotModel', LIVE_MODELS);
+fillSelect('aiModel', CODER_MODELS);
+
+const aiState = APP.ai?.state || {
+  geminiKey: localStorage.getItem('ai_gemini_key') || '',
+  openAiKey: localStorage.getItem('ai_openai_key') || '',
+  claudeKey: localStorage.getItem('ai_claude_key') || '',
+  groqKey: localStorage.getItem('free_stt_key') || localStorage.getItem('ai_groq_key') || '',
+  githubToken: localStorage.getItem('ai_github_token') || '',
+  branch: localStorage.getItem('ai_github_branch') || 'main',
+  model: localStorage.getItem('ai_model') || 'gemini-3.8-flash',
+  thinkingLevel: localStorage.getItem('ai_think') || 'high',
+  pendingPlan: null, rollbackSnapshot: null, sandboxActive: false, chatHistory: [],
+  latestEditedHtml: null, latestHtmlFilename: 'Say-It-See-It.html',
+  discoveredGeminiModels: null, discoveredGroqModels: null
+};
+
+if (!CODER_MODELS.some(([v]) => v === aiState.model)) aiState.model = 'gemini-3.8-flash';
+if ($('aiGeminiKey')) $('aiGeminiKey').value = aiState.geminiKey;
+if ($('aiOpenAiKey')) $('aiOpenAiKey').value = aiState.openAiKey;
+if ($('aiClaudeKey')) $('aiClaudeKey').value = aiState.claudeKey;
+if ($('aiGroqKey')) $('aiGroqKey').value = aiState.groqKey;
+if ($('freeSttKey')) $('freeSttKey').value = aiState.groqKey;
+if ($('aiGithubToken')) $('aiGithubToken').value = aiState.githubToken;
+if ($('aiBranch')) $('aiBranch').value = aiState.branch;
+if ($('aiModel')) $('aiModel').value = aiState.model;
+if ($('aiThink')) $('aiThink').value = aiState.thinkingLevel;
+if ($('aiSettingsBox') && !aiState.geminiKey && !aiState.openAiKey && !aiState.claudeKey && !aiState.groqKey) {
+  $('aiSettingsBox').style.display = 'flex';
+}
+
+function saveCreds() {
+  if ($('aiGeminiKey')) aiState.geminiKey = ($('aiGeminiKey').value || '').trim();
+  if ($('aiOpenAiKey')) aiState.openAiKey = ($('aiOpenAiKey').value || '').trim();
+  if ($('aiClaudeKey')) aiState.claudeKey = ($('aiClaudeKey').value || '').trim();
+  const gk = $('aiGroqKey') ? ($('aiGroqKey').value || '').trim() : '';
+  const fk = $('freeSttKey') ? ($('freeSttKey').value || '').trim() : '';
+  aiState.groqKey = gk || fk || aiState.groqKey;
+  if ($('aiGithubToken')) aiState.githubToken = ($('aiGithubToken').value || '').trim();
+  if ($('aiBranch')) aiState.branch = ($('aiBranch').value || 'main').trim() || 'main';
+  localStorage.setItem('ai_gemini_key', aiState.geminiKey);
+  localStorage.setItem('ai_openai_key', aiState.openAiKey);
+  localStorage.setItem('ai_claude_key', aiState.claudeKey);
+  localStorage.setItem('ai_groq_key', aiState.groqKey);
+  localStorage.setItem('free_stt_key', aiState.groqKey);
+  localStorage.setItem('ai_github_token', aiState.githubToken);
+  localStorage.setItem('ai_github_branch', aiState.branch);
+}
+
+if (!window.__aiModelInputsBound) {
+  window.__aiModelInputsBound = true;
+  $('aiGeminiKey')?.addEventListener('input', () => { aiState.discoveredGeminiModels = null; saveCreds(); });
+  $('aiOpenAiKey')?.addEventListener('input', saveCreds);
+  $('aiClaudeKey')?.addEventListener('input', saveCreds);
+  $('aiGroqKey')?.addEventListener('input', () => { aiState.discoveredGroqModels = null; if ($('freeSttKey')) $('freeSttKey').value = $('aiGroqKey').value; saveCreds(); });
+  $('freeSttKey')?.addEventListener('input', () => { aiState.discoveredGroqModels = null; if ($('aiGroqKey')) $('aiGroqKey').value = $('freeSttKey').value; saveCreds(); });
+  $('aiGithubToken')?.addEventListener('input', saveCreds);
+  $('aiBranch')?.addEventListener('input', saveCreds);
+  $('aiModel')?.addEventListener('change', e => {
+    aiState.model = e.target.value;
+    localStorage.setItem('ai_model', aiState.model);
+    if ($('liveBotModel') && !/live|native-audio/i.test(aiState.model) && [...$('liveBotModel').options].some(o => o.value === aiState.model)) {
+      $('liveBotModel').value = aiState.model;
+      localStorage.setItem('ai_live_model', aiState.model);
+      if (APP.liveCompanion) {
+        APP.liveCompanion.modelName = aiState.model;
+        if (APP.liveCompanion.enabled) APP.liveCompanion.startLiveSession().catch(() => {});
+      }
+    }
+  });
+  $('aiThink')?.addEventListener('change', e => { aiState.thinkingLevel = e.target.value; localStorage.setItem('ai_think', aiState.thinkingLevel); });
+}
+
+function appendLog(text, cls = 'bot') {
+  const box = $('aiLog'); if (!box) return;
+  const div = document.createElement('div');
+  div.className = 'ai-msg ' + cls; div.textContent = text;
+  box.appendChild(div); box.scrollTop = box.scrollHeight;
+}
+
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+function isRecoverableApiError(status, msg = '') {
+  return status === 503 || status === 429 || /high demand|overload|temporarily unavailable/i.test(String(msg));
+}
+
+function formatFriendlyError(mdl, status, rawMsg = '') {
+  const msg = String(rawMsg || '');
+  if (status === 401 || status === 403 || /api key|unauthorized|invalid.*key|permission/i.test(msg)) {
+    return `مفتاح الـ API غير صالح أو مرفوض للنموذج (${mdl}). تحقق من المفتاح في الإعدادات ⚙️ (${msg.slice(0, 120)})`;
+  }
+  if (status === 429 || /quota|rate limit|resource_exhausted/i.test(msg)) {
+    return `تم تجاوز حد الاستخدام المجاني المؤقت (429) للنموذج (${mdl}). انتظر بضع ثوانٍ أو اختر نموذجاً مجانياً آخر من القائمة.`;
+  }
+  if (status === 404 || /not found|not supported/i.test(msg)) {
+    return `النموذج (${mdl}) غير متاح على هذا المفتاح حالياً (404). اختر نموذجاً آخر من القائمة مثل gemini-3.8-flash أو groq:openai/gpt-oss-120b.`;
+  }
+  if (status === 400) {
+    return `طلب غير مقبول (400) من (${mdl}): ${msg.slice(0, 160)}`;
+  }
+  if (status === 503 || /overload|unavailable/i.test(msg)) {
+    return `خادم النموذج (${mdl}) مزدحم مؤقتاً (503). أعد المحاولة بعد لحظة أو اختر نموذجاً آخر.`;
+  }
+  return `خطأ في النموذج (${mdl}) [${status || 'net'}]: ${msg.slice(0, 180)}`;
+}
+
+function lowercaseSchemaTypes(schema) {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(lowercaseSchemaTypes);
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) out[k] = (k === 'type' && typeof v === 'string') ? v.toLowerCase() : lowercaseSchemaTypes(v);
+  return out;
+}
+function repairJsonString(str) {
+  let out = '', inStr = false, esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i], code = ch.charCodeAt(0);
+    if (!inStr) { if (ch === '"') inStr = true; out += ch; }
+    else if (esc) { out += ('"\\/bfnrt'.includes(ch) || (ch === 'u' && /^[0-9a-fA-F]{4}$/.test(str.slice(i + 1, i + 5)))) ? ch : ('\\' + ch); esc = false; }
+    else if (ch === '\\') { out += ch; esc = true; }
+    else if (ch === '"') { inStr = false; out += ch; }
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\r') out += '\\r';
+    else if (ch === '\t') out += '\\t';
+    else if (code >= 32) out += ch;
+  }
+  return out;
+}
+function parseJsonSafe(raw) {
+  const cleaned = String(raw || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  try { return JSON.parse(cleaned); }
+  catch {
+    const first = cleaned.indexOf('{'), last = cleaned.lastIndexOf('}');
+    const sub = (first >= 0 && last > first) ? cleaned.slice(first, last + 1) : cleaned;
+    return JSON.parse(repairJsonString(sub));
+  }
+}
+
+async function discoverGeminiModels() {
+  if (!aiState.geminiKey) return [];
+  if (aiState.discoveredGeminiModels) return aiState.discoveredGeminiModels;
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(aiState.geminiKey)}`);
+    if (r.ok) {
+      const d = await r.json();
+      const list = (d.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => m.name.replace(/^models\//, '')).filter(n => !/embedding|tts|imagen|aqa|robotics/i.test(n));
+      aiState.discoveredGeminiModels = list;
+      return list;
+    }
+  } catch {}
+  return ['gemini-3.8-flash', 'gemini-4-hydrogen', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+}
+
+function extractGeminiInteractionsText(d) {
+  if (!d) return '';
+  if (typeof d.output_text === 'string' && d.output_text) return d.output_text;
+  if (Array.isArray(d.outputs)) {
+    const t = d.outputs.filter(o => typeof o.text === 'string').map(o => o.text).join('\n');
+    if (t) return t;
+  }
+  if (Array.isArray(d.steps)) {
+    const t = d.steps.map(s => s?.model_output?.content?.text || '').filter(Boolean).join('\n');
+    if (t) return t;
+  }
+  const cParts = d.candidates?.[0]?.content?.parts || [];
+  return cParts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join('');
+}
+
+async function callGeminiDirect(mdl, systemPrompt, userPrompt, thinkLevel = 'high') {
+  const safeThink = ['low', 'medium', 'high', 'xhigh'].includes(thinkLevel) ? thinkLevel : 'high';
+  if (/^gemini-(4|3\.8)/i.test(mdl)) {
+    try {
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey },
+        body: JSON.stringify({
+          model: mdl,
+          system_instruction: systemPrompt,
+          input: userPrompt,
+          generation_config: { thinking_level: mdl === 'gemini-4-hydrogen' ? safeThink : (safeThink === 'xhigh' ? 'high' : safeThink), max_output_tokens: 8192 }
+        })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const t = extractGeminiInteractionsText(d);
+        if (t) return t;
+      }
+      if (r.status === 401 || r.status === 403) {
+        const e = new Error(formatFriendlyError(mdl, r.status, d.error?.message || r.statusText));
+        e.status = r.status; throw e;
+      }
+    } catch (e) { if (e.status === 401 || e.status === 403) throw e; }
+  }
+
+  let useThink = true;
+  for (let att = 0; att < 2; att++) {
+    const body = { systemInstruction: { parts: [{ text: systemPrompt }] }, contents: [{ role: 'user', parts: [{ text: userPrompt }] }] };
+    if (useThink && /gemini-(3|4)/i.test(mdl)) body.generationConfig = { thinkingConfig: { thinkingLevel: safeThink === 'xhigh' ? 'high' : safeThink } };
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mdl)}:generateContent`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': aiState.geminiKey }, body: JSON.stringify(body)
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) {
+      const parts = d.candidates?.[0]?.content?.parts || [];
+      const t = parts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join('') || parts.map(p => p.text || '').join('');
+      if (t) return t;
+    }
+    if (r.status === 400 && useThink && att === 0) { useThink = false; continue; }
+    if ((r.status === 503 || r.status === 429) && att === 0) { await sleepMs(700); continue; }
+    const e = new Error(formatFriendlyError(mdl, r.status, d.error?.message || r.statusText));
+    e.status = r.status; throw e;
+  }
+  throw new Error(`النموذج (${mdl}) أرجع رداً فارغاً.`);
+}
+
+function assertKeyForModel(mdl) {
+  saveCreds();
+  const hasGemini = aiState.geminiKey.startsWith('AIza');
+  const hasOpenAi = aiState.openAiKey.startsWith('sk-');
+  const hasClaude = aiState.claudeKey.startsWith('sk-ant-');
+  const hasGroq = (aiState.groqKey || '').startsWith('gsk_');
+
+  if (mdl.startsWith('openai:')) {
+    if (!hasOpenAi) throw new Error('اخترت نموذج OpenAI، لكن مفتاح OpenAI (sk-...) غير موجود في الإعدادات ⚙️.');
+  } else if (mdl.startsWith('claude:')) {
+    if (!hasClaude) throw new Error('اخترت نموذج Claude، لكن مفتاح Anthropic (sk-ant-...) غير موجود في الإعدادات ⚙️.');
+  } else if (mdl.startsWith('groq:')) {
+    if (!hasGroq) throw new Error('اخترت نموذج Groq المجاني، لكن مفتاح Groq (gsk_...) غير موجود في الإعدادات ⚙️.');
+  } else {
+    if (!hasGemini) {
+      if ($('aiPanel')) $('aiPanel').classList.add('open');
+      if ($('aiSettingsBox')) $('aiSettingsBox').style.display = 'flex';
+      throw new Error('أدخل مفتاح Gemini المجاني (AIza...) في الإعدادات ⚙️ أو اختر Groq مع مفتاحه.');
+    }
+  }
+}
+
+// Single-AI strict selector: uses the exact chosen model without conflicting multi-provider switching
+async function getSmartProviderChain(preferredModel) {
+  saveCreds();
+  const chosen = preferredModel || $('aiModel')?.value || $('liveBotModel')?.value || aiState.model || 'gemini-3.8-flash';
+  assertKeyForModel(chosen);
+  return [chosen];
+}
+
+async function callAnyProviderRaw(systemPrompt, userPrompt, preferredModel) {
+  const mdl = preferredModel || $('aiModel')?.value || aiState.model || 'gemini-3.8-flash';
+  assertKeyForModel(mdl);
+
+  if (mdl.startsWith('claude:')) {
+    const cModel = mdl.slice(7);
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': aiState.claudeKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: cModel, max_tokens: 4096, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(formatFriendlyError(mdl, r.status, d.error?.message || r.statusText)); e.status = r.status; throw e; }
+    const t = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (!t) throw new Error(`رد فارغ من ${mdl}`);
+    return { text: t, modelUsed: mdl };
+  }
+
+  if (mdl.startsWith('openai:') || mdl.startsWith('groq:')) {
+    const isOpenAi = mdl.startsWith('openai:');
+    const ep = isOpenAi ? 'https://api.openai.com/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions';
+    const key = isOpenAi ? aiState.openAiKey : aiState.groqKey;
+    const r = await fetch(ep, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({ model: mdl.slice(mdl.indexOf(':') + 1), messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(formatFriendlyError(mdl, r.status, d.error?.message || r.statusText)); e.status = r.status; throw e; }
+    const t = d.choices?.[0]?.message?.content || '';
+    if (!t) throw new Error(`رد فارغ من ${mdl}`);
+    return { text: t, modelUsed: mdl };
+  }
+
+  const t = await callGeminiDirect(mdl, systemPrompt, userPrompt, $('aiThink')?.value || 'high');
+  return { text: t, modelUsed: mdl };
+}
+
+APP.ai = {
+  state: aiState, saveCreds, appendLog, sleepMs, isRecoverableApiError, formatFriendlyError,
+  lowercaseSchemaTypes, parseJsonSafe, discoverGeminiModels,
+  callGeminiDirect, getSmartProviderChain, callAnyProviderRaw,
+  LIVE_MODELS, CODER_MODELS
+};
