@@ -1800,3 +1800,81 @@ await APP.createProcedural({ name: "girl_sculpture", dist: 2.0, yaw: 0, code: \`
   base.position.y = 0.15;
   group.add(base);
 \`});
+
+@ability: spawn_procedural_dog
+@match: create a dog | dog | كلب | اصنع كلب
+@code:
+const THREE = APP.THREE;
+await APP.createProcedural({
+  name: "dog",
+  dist: 2.0,
+  yaw: 0,
+  code: `
+    const V3 = THREE.Vector3;
+    const mat = APP.craft.mat({ tex: 'fur', color: '#8B4513' });
+    const darkMat = APP.craft.mat({ tex: 'fur', color: '#4A2E18' });
+    const pinkMat = APP.craft.mat({ tex: 'plastic', color: '#FFB6C1' });
+    const blackMat = APP.craft.mat({ tex: 'plastic', color: '#000000' });
+
+    // Body
+    const body = APP.craft.bevelBox(0.4, 0.5, 0.8, 0.1, mat);
+    body.position.set(0, 0.5, 0);
+    group.add(body);
+
+    // Head
+    const head = APP.craft.sphere(0.25, 32, 32, mat);
+    head.position.set(0, 0.85, 0.55);
+    group.add(head);
+
+    // Snout
+    const snout = APP.craft.bevelBox(0.18, 0.12, 0.15, 0.05, darkMat);
+    snout.position.set(0, 0.8, 0.65);
+    snout.rotation.x = Math.PI / 12;
+    group.add(snout);
+
+    // Nose
+    const nose = APP.craft.sphere(0.06, 16, 16, blackMat);
+    nose.position.set(0, 0.83, 0.73);
+    group.add(nose);
+
+    // Eyes
+    const leftEye = APP.craft.sphere(0.04, 16, 16, blackMat);
+    leftEye.position.set(0.1, 0.9, 0.62);
+    group.add(leftEye);
+    const rightEye = leftEye.clone();
+    rightEye.position.x = -0.1;
+    group.add(rightEye);
+
+    // Ears
+    const leftEar = APP.craft.bevelBox(0.08, 0.2, 0.05, 0.02, darkMat);
+    leftEar.position.set(0.18, 1.0, 0.45);
+    leftEar.rotation.z = -Math.PI / 12;
+    group.add(leftEar);
+    const rightEar = leftEar.clone();
+    rightEar.position.x = -0.18;
+    rightEar.rotation.z = Math.PI / 12;
+    group.add(rightEar);
+
+    // Legs
+    const legGeo = new THREE.CylinderGeometry(0.06, 0.05, 0.4, 16);
+    const leg1 = new THREE.Mesh(legGeo, mat);
+    leg1.position.set(0.2, 0.2, 0.4);
+    group.add(leg1);
+    const leg2 = leg1.clone();
+    leg2.position.set(-0.2, 0.2, 0.4);
+    group.add(leg2);
+    const leg3 = leg1.clone();
+    leg3.position.set(0.2, 0.2, -0.4);
+    group.add(leg3);
+    const leg4 = leg1.clone();
+    leg4.position.set(-0.2, 0.2, -0.4);
+    group.add(leg4);
+
+    // Tail
+    const tailGeo = new THREE.CylinderGeometry(0.04, 0.02, 0.3, 16);
+    const tail = new THREE.Mesh(tailGeo, mat);
+    tail.position.set(0, 0.7, -0.5);
+    tail.rotation.x = Math.PI / 4;
+    group.add(tail);
+  `
+});
