@@ -1,0 +1,1008 @@
+@ability: realism_core_shaders
+@autorun
+@code:
+const THREE = APP.THREE;
+if (APP.realism && APP.realism._init) return;
+
+const R = APP.realism = {
+  _init: true,
+  enhancedMeshes: new WeakSet(),
+  enhancedMaterials: new WeakSet(),
+  wetnessMap: new WeakMap(),
+  uniformsList: [],
+  breakWatch: new Map(),
+  config: {
+    fogDensity: 0.028,
+    dustEnabled: true,
+    causticsEnabled: true,
+    motionBlurEnabled: true,
+    windStrength: 1.0,
+    globalWetness: 0.0
+  }
+};
+
+// Procedural PBR Micro-Detail, Edge-Wear, Caustics & Fur Textures
+function makeCanvasTex(size, drawFn, repeat = 1) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  drawFn(ctx, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeat, repeat);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+const microNormalTex = makeCanvasTex(256, (ctx, s) => {
+  const img = ctx.createImageData(s, s);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n1 = Math.sin(i * 0.017) * Math.cos(i * 0.031);
+    const n2 = (Math.random() - 0.5) * 0.6;
+    img.data[i] = Math.floor(128 + (n1 * 22 + n2 * 18));
+    img.data[i + 1] = Math.floor(128 + (n1 * 18 - n2 * 22));
+    img.data[i + 2] = 245;
+    img.data[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}, 3);
+
+const causticsTex = makeCanvasTex(256, (ctx, s) => {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, s, s);
+  ctx.strokeStyle = 'rgba(140, 235, 255, 0.45)';
+  ctx.lineWidth = 2.2;
+  for (let i = 0; i < 48; i++) {
+    ctx.beginPath();
+    const x = Math.random() * s;
+    const y = Math.random() * s;
+    const r = 14 + Math.random() * 34;
+    ctx.ellipse(x, y, r, r * 0.55, Math.random() * Math.PI, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}, 2);
+
+const furAlphaTex = makeCanvasTex(128, (ctx, s) => {
+  ctx.clearRect(0, 0, s, s);
+  for (let i = 0; i < 900; i++) {
+    const x = Math.random() * s;
+    const y = Math.random() * s;
+    const r = 0.8 + Math.random() * 1.8;
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + Math.random() * 0.55) + ')';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}, 4);
+
+const aoDecalTex = makeCanvasTex(128, (ctx, s) => {
+  const g = ctx.createRadialGradient(s / 2, s / 2, s * 0.05, s / 2, s / 2, s * 0.5);
+  g.addColorStop(0, 'rgba(0,0,0,0.52)');
+  g.addColorStop(0.55, 'rgba(0,0,0,0.22)');
+  g.addColorStop(1, 'rgba(0,0,0,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+}, 1);
+
+R.textures = { microNormalTex, causticsTex, furAlphaTex, aoDecalTex };
+
+// Realistic Shader Injector: AO, SSS, Edge Wear, Parallax Depth, Wetness & Wind
+R.enhanceMaterial = function(mat, opts = {}) {
+  if (!mat || R.enhancedMaterials.has(mat)) return mat;
+  if (!(mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) return mat;
+  R.enhancedMaterials.add(mat);
+
+  if (!mat.normalMap) {
+    mat.normalMap = microNormalTex;
+    mat.normalScale = new THREE.Vector2(opts.microDepth || 0.35, opts.microDepth || 0.35);
+  }
+  if (mat.roughness !== undefined && mat.roughness < 0.08) mat.roughness = 0.12;
+
+  const u = {
+    uTime: { value: 0 },
+    uWind: { value: new THREE.Vector3(0.4, 0, 0.2) },
+    uWindAmp: { value: opts.windAmp || 0.0 },
+    uSSS: { value: opts.sss || 0.0 },
+    uSSSColor: { value: new THREE.Color(opts.sssColor || '#ff6b4a') },
+    uEdgeWear: { value: opts.edgeWear !== undefined ? opts.edgeWear : 0.38 },
+    uWetness: { value: opts.wetness || 0.0 },
+    uParallax: { value: opts.parallax || 0.015 },
+    uAOStrength: { value: opts.ao || 0.45 }
+  };
+  mat.userData.realismUniforms = u;
+  R.uniformsList.push(u);
+
+  const prevCompile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader) => {
+    if (prevCompile) prevCompile(shader);
+    Object.assign(shader.uniforms, u);
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTime;
+        uniform vec3 uWind;
+        uniform float uWindAmp;
+        varying vec3 vWorldPosR;
+        varying vec3 vWorldNormR;
+      `)
+      .replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        if (uWindAmp > 0.001) {
+          float sway = sin(uTime * 2.6 + position.y * 5.0 + position.x * 3.0) * uWindAmp * max(0.0, position.y + 0.3);
+          transformed.x += uWind.x * sway;
+          transformed.z += uWind.z * sway;
+        }
+      `)
+      .replace('#include <worldpos_vertex>', `
+        #include <worldpos_vertex>
+        vec4 wpR = modelMatrix * vec4(transformed, 1.0);
+        vWorldPosR = wpR.xyz;
+        vWorldNormR = normalize(mat3(modelMatrix) * objectNormal);
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `
+        #include <common>
+        uniform float uTime;
+        uniform float uSSS;
+        uniform vec3 uSSSColor;
+        uniform float uEdgeWear;
+        uniform float uWetness;
+        uniform float uParallax;
+        uniform float uAOStrength;
+        varying vec3 vWorldPosR;
+        varying vec3 vWorldNormR;
+        float hashR(vec3 p) {
+          p = fract(p * 0.3183099 + 0.1);
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+      `)
+      .replace('#include <roughnessmap_fragment>', `
+        #include <roughnessmap_fragment>
+        // Surface wetness lowers roughness and creates droplet sheen
+        float wetMask = clamp(uWetness, 0.0, 1.0);
+        float droplets = smoothstep(0.72, 0.95, sin(vWorldPosR.x * 48.0) * cos(vWorldPosR.z * 48.0 + uTime * 1.2));
+        roughnessFactor = mix(roughnessFactor, 0.06, wetMask * (0.75 + 0.25 * droplets));
+      `)
+      .replace('#include <dithering_fragment>', `
+        vec3 viewDirR = normalize(cameraPosition - vWorldPosR);
+        float ndv = clamp(abs(dot(normalize(vWorldNormR), viewDirR)), 0.0, 1.0);
+        float fresnelR = pow(1.0 - ndv, 3.0);
+
+        // Contact & Crevice Ambient Occlusion
+        float floorAO = smoothstep(0.0, 0.28, vWorldPosR.y);
+        float creviceAO = mix(1.0 - uAOStrength * 0.45, 1.0, floorAO);
+        gl_FragColor.rgb *= creviceAO;
+
+        // Parallax micro-relief shading
+        float pNoise = hashR(floor((vWorldPosR + viewDirR * uParallax) * 32.0));
+        gl_FragColor.rgb *= (0.94 + pNoise * 0.12);
+
+        // Edge Wear: exposed lighter/metallic edge scratches
+        if (uEdgeWear > 0.01) {
+          float scratch = smoothstep(0.62, 0.92, hashR(floor(vWorldPosR * 45.0)));
+          float wear = fresnelR * uEdgeWear * (0.5 + 0.5 * scratch);
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * 1.35 + vec3(0.14), wear * 0.55);
+        }
+
+        // Subsurface Scattering (skin, wax, leaves, organic)
+        if (uSSS > 0.01) {
+          float sssTerm = pow(1.0 - ndv, 2.0) * uSSS;
+          gl_FragColor.rgb += uSSSColor * sssTerm * 0.42;
+        }
+
+        // Surface Wetness darkening + wet specular rim
+        if (uWetness > 0.01) {
+          gl_FragColor.rgb *= mix(1.0, 0.68, clamp(uWetness, 0.0, 1.0));
+          gl_FragColor.rgb += vec3(0.28, 0.34, 0.42) * fresnelR * clamp(uWetness, 0.0, 1.0) * 0.65;
+        }
+        #include <dithering_fragment>
+      `);
+  };
+  mat.needsUpdate = true;
+  return mat;
+};
+
+// Multi-layer Fur & Hair Shell Generator for realistic organic surfaces
+R.addFurShells = function(mesh, opts = {}) {
+  if (!mesh || !mesh.geometry || mesh.userData._hasFur) return;
+  mesh.userData._hasFur = true;
+  const layers = opts.layers || 7;
+  const length = opts.length || 0.028;
+  const baseColor = (mesh.material && mesh.material.color) ? mesh.material.color.clone() : new THREE.Color('#6b4f3a');
+  const shellGroup = new THREE.Group();
+  shellGroup.name = 'realism_fur_shells';
+
+  for (let i = 1; i <= layers; i++) {
+    const t = i / layers;
+    const mat = new THREE.MeshStandardMaterial({
+      color: baseColor.clone().multiplyScalar(0.55 + t * 0.55),
+      alphaMap: furAlphaTex,
+      alphaTest: 0.25 + t * 0.55,
+      roughness: 0.88,
+      metalness: 0.02,
+      side: THREE.DoubleSide
+    });
+    R.enhanceMaterial(mat, { windAmp: 0.06 * t, sss: 0.25, sssColor: '#d9a066', edgeWear: 0.05 });
+    const shell = new THREE.Mesh(mesh.geometry, mat);
+    const s = 1 + length * t;
+    shell.scale.set(s, s, s);
+    shell.castShadow = false;
+    shell.receiveShadow = true;
+    shellGroup.add(shell);
+  }
+  mesh.add(shellGroup);
+};
+
+// Contact Ambient Occlusion & Break Debris Burst
+R.spawnBreakDebris = function(pos, colorHex = '#999999', count = 26) {
+  const geo = new THREE.DodecahedronGeometry(0.018, 0);
+  const mat = APP.craft.mat({ tex: 'stone', color: colorHex, rough: 0.75 });
+  const inst = new THREE.InstancedMesh(geo, mat, count);
+  inst.userData.skipMatrixShader = true;
+  APP.scene.add(inst);
+
+  const pts = [];
+  const dummy = new THREE.Object3D();
+  for (let i = 0; i < count; i++) {
+    pts.push({
+      p: pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.25, Math.random() * 0.2, (Math.random() - 0.5) * 0.25)),
+      v: new THREE.Vector3((Math.random() - 0.5) * 2.4, 1.0 + Math.random() * 2.2, (Math.random() - 0.5) * 2.4),
+      r: new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6),
+      s: 0.5 + Math.random() * 1.1
+    });
+  }
+
+  APP.onTick('debris_' + Math.random().toString(36).slice(2, 7), 3.2, (dt, t) => {
+    const fade = Math.max(0, 1 - t / 3.2);
+    for (let i = 0; i < count; i++) {
+      const o = pts[i];
+      o.v.y -= 9.8 * dt;
+      o.p.addScaledVector(o.v, dt);
+      if (o.p.y < 0.015) {
+        o.p.y = 0.015;
+        o.v.y *= -0.35;
+        o.v.x *= 0.72;
+        o.v.z *= 0.72;
+      }
+      o.r.x += dt * 4.5;
+      o.r.y += dt * 3.2;
+      dummy.position.copy(o.p);
+      dummy.rotation.copy(o.r);
+      dummy.scale.setScalar(o.s * fade);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+  }, () => {
+    APP.scene.remove(inst);
+    geo.dispose();
+    mat.dispose();
+  });
+};
+
+// Auto-enhance every entity (including AI mode creations)
+R.upgradeEntity = function(ent) {
+  if (!ent || !ent.root || ent.root.userData._realismUpgraded) return;
+  ent.root.userData._realismUpgraded = true;
+  const label = (ent.name || '').toLowerCase();
+  const isFur = /(fur|hair|cat|dog|wolf|bear|lion|fox|plush|carpet|wool|شعر|فرو|قط|كلب|دب)/.test(label);
+  const isOrganic = /(skin|leaf|plant|tree|flower|wax|candle|fruit|human|hand|face|ورق|شمع|نبات|بشرة)/.test(label);
+  const isMetal = /(metal|sword|armor|car|robot|iron|steel|gold|bronze|معدن|حديد|سيف|روبوت)/.test(label);
+  const isGlass = /(glass|water|ice|crystal|diamond|زجاج|ماء|جليد|كريستال)/.test(label);
+
+  ent.root.traverse((obj) => {
+    if (!obj.isMesh || R.enhancedMeshes.has(obj)) return;
+    R.enhancedMeshes.add(obj);
+    obj.castShadow = true;
+    obj.receiveShadow = true;
+
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    mats.forEach((m) => {
+      R.enhanceMaterial(m, {
+        sss: isOrganic ? 0.65 : (isFur ? 0.25 : 0.0),
+        sssColor: /(leaf|plant|tree|ورق|نبات)/.test(label) ? '#55cc44' : '#ff7755',
+        edgeWear: isMetal ? 0.72 : (isOrganic ? 0.12 : 0.35),
+        windAmp: (isOrganic || isFur) ? 0.045 : 0.0,
+        wetness: isGlass ? 0.35 : R.config.globalWetness,
+        parallax: isMetal ? 0.01 : 0.022
+      });
+    });
+
+    if (isFur && !obj.userData._hasFur) {
+      R.addFurShells(obj, { layers: 6, length: 0.024 });
+    }
+  });
+
+  // Contact Ambient Occlusion Decal under grounded objects
+  const box = APP.computeBox ? APP.computeBox(ent.root) : new THREE.Box3().setFromObject(ent.root);
+  const size = box.getSize(new THREE.Vector3());
+  if (size.x > 0.05 && size.z > 0.05 && size.x < 8) {
+    const aoGeo = new THREE.PlaneGeometry(size.x * 1.35, size.z * 1.35);
+    const aoMat = new THREE.MeshBasicMaterial({
+      map: aoDecalTex, transparent: true, depthWrite: false, opacity: 0.65
+    });
+    const aoMesh = new THREE.Mesh(aoGeo, aoMat);
+    aoMesh.rotation.x = -Math.PI / 2;
+    aoMesh.position.set(0, -size.y * 0.48 + 0.004, 0);
+    aoMesh.name = 'realism_contact_ao';
+    ent.root.add(aoMesh);
+  }
+
+  // Caustics projector under glass/water objects
+  if (isGlass && R.config.causticsEnabled) {
+    const cGeo = new THREE.PlaneGeometry(Math.max(0.6, size.x * 1.8), Math.max(0.6, size.z * 1.8));
+    const cMat = new THREE.MeshBasicMaterial({
+      map: causticsTex, transparent: true, blending: THREE.AdditiveBlending,
+      depthWrite: false, opacity: 0.42, color: '#99eeff'
+    });
+    const cMesh = new THREE.Mesh(cGeo, cMat);
+    cMesh.rotation.x = -Math.PI / 2;
+    cMesh.position.set(0, -size.y * 0.48 + 0.008, 0);
+    cMesh.userData._isCaustic = true;
+    ent.root.add(cMesh);
+  }
+
+  if (APP.updateReflection) APP.updateReflection(ent.root.position);
+};
+
+// Atmospheric Micro-Particles (Dust, Pollen, Ash) & Volumetric Depth Fog
+const dustCount = 260;
+const dustGeo = new THREE.OctahedronGeometry(0.0045, 0);
+const dustMat = new THREE.MeshBasicMaterial({
+  color: '#fff6e5', transparent: true, opacity: 0.42, depthWrite: false
+});
+const dustInst = new THREE.InstancedMesh(dustGeo, dustMat, dustCount);
+dustInst.userData.skipMatrixShader = true;
+APP.scene.add(dustInst);
+
+const dustData = [];
+for (let i = 0; i < dustCount; i++) {
+  dustData.push({
+    p: new THREE.Vector3((Math.random() - 0.5) * 6, 0.2 + Math.random() * 2.8, (Math.random() - 0.5) * 6),
+    v: new THREE.Vector3((Math.random() - 0.5) * 0.06, (Math.random() - 0.5) * 0.03, (Math.random() - 0.5) * 0.06),
+    s: 0.5 + Math.random() * 1.4,
+    ph: Math.random() * 6.28
+  });
+}
+
+// Configure soft realistic shadows and subtle volumetric fog in VR/Desktop
+if (APP.renderer && APP.renderer.shadowMap) {
+  APP.renderer.shadowMap.enabled = true;
+  APP.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+}
+if (!APP.isAR && !APP.scene.fog) {
+  APP.scene.fog = new THREE.FogExp2('#10151c', R.config.fogDensity);
+}
+
+// Main Realism Tick Loop
+const _dummy = new THREE.Object3D();
+let _scanTimer = 0;
+
+APP.onTick('realism_core_loop', 0, (dt, t) => {
+  const wind = APP.worldWind || new THREE.Vector3(0.45, 0, 0.2);
+
+  // Update all enhanced shader uniforms
+  for (let i = 0; i < R.uniformsList.length; i++) {
+    const u = R.uniformsList[i];
+    u.uTime.value = t;
+    u.uWind.value.copy(wind).multiplyScalar(R.config.windStrength);
+  }
+
+  // Animate caustics texture drift
+  causticsTex.offset.set(Math.sin(t * 0.35) * 0.15, t * 0.08);
+
+  // Update floating dust/pollen micro-particles with wind & hand airflow
+  dustInst.visible = R.config.dustEnabled;
+  if (R.config.dustEnabled) {
+    const hp = APP.headPos || new THREE.Vector3(0, 1.6, 0);
+    for (let i = 0; i < dustCount; i++) {
+      const d = dustData[i];
+      d.p.x += (d.v.x + wind.x * 0.08 + Math.sin(t * 0.9 + d.ph) * 0.02) * dt;
+      d.p.y += (d.v.y + Math.cos(t * 0.7 + d.ph) * 0.015) * dt;
+      d.p.z += (d.v.z + wind.z * 0.08) * dt;
+
+      // Hand airflow wake pushes nearby dust
+      if (APP.hands) {
+        for (const side of ['left', 'right']) {
+          const h = APP.hands[side];
+          if (h && h.wp && h.vel && d.p.distanceToSquared(h.wp) < 0.22) {
+            d.p.addScaledVector(h.vel, dt * 0.55);
+          }
+        }
+      }
+
+      // Wrap dust volume around user
+      if (Math.abs(d.p.x - hp.x) > 3.2) d.p.x = hp.x + (Math.random() - 0.5) * 6;
+      if (Math.abs(d.p.z - hp.z) > 3.2) d.p.z = hp.z + (Math.random() - 0.5) * 6;
+      if (d.p.y < 0.1 || d.p.y > 3.2) d.p.y = 0.2 + Math.random() * 2.6;
+
+      _dummy.position.copy(d.p);
+      _dummy.scale.setScalar(d.s);
+      _dummy.updateMatrix();
+      dustInst.setMatrixAt(i, _dummy.matrix);
+    }
+    dustInst.instanceMatrix.needsUpdate = true;
+  }
+
+  // Periodically scan and upgrade newly spawned entities + detect broken/removed entities
+  _scanTimer += dt;
+  if (_scanTimer > 0.35) {
+    _scanTimer = 0;
+    const ents = APP.findEntities ? APP.findEntities('all') : [];
+    const aliveIds = new Set();
+    for (const ent of ents) {
+      if (!ent || !ent.root) continue;
+      aliveIds.add(ent.root.uuid);
+      R.upgradeEntity(ent);
+      R.breakWatch.set(ent.root.uuid, ent.root.position.clone());
+    }
+    for (const [id, lastPos] of R.breakWatch.entries()) {
+      if (!aliveIds.has(id)) {
+        R.spawnBreakDebris(lastPos, '#8899aa', 22);
+        R.breakWatch.delete(id);
+      }
+    }
+  }
+}, null, true);
+
+@ability: volumetric_water_sim
+@pin
+@match: pour water | water pool | splash water | volumetric water | صب ماء | بركة ماء | ماء واقعي
+@code:
+const THREE = APP.THREE;
+const isPool = /(pool|basin|pond|بركة|حوض)/.test((text || '').toLowerCase());
+const isPour = /(pour|stream|faucet|صب|اسكب|شلال)/.test((text || '').toLowerCase()) || !isPool;
+
+if (!APP.realism) APP.realism = {};
+if (!APP.realism.water) {
+  const MAX_P = 420;
+  const geo = new THREE.SphereGeometry(0.026, 10, 10);
+  const mat = APP.craft.mat({
+    tex: 'water', color: '#38b6ff', rough: 0.04, metal: 0.05,
+    clearcoat: 1.0, opacity: 0.82
+  });
+  mat.transparent = true;
+  const inst = new THREE.InstancedMesh(geo, mat, MAX_P);
+  inst.userData.skipMatrixShader = true;
+  APP.scene.add(inst);
+
+  // Dynamic Caustics Pool Light on floor
+  const causticGeo = new THREE.CircleGeometry(1.1, 32);
+  const causticMat = new THREE.MeshBasicMaterial({
+    map: APP.realism.textures ? APP.realism.textures.causticsTex : null,
+    color: '#66ddff', transparent: true, opacity: 0.45,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const causticMesh = new THREE.Mesh(causticGeo, causticMat);
+  causticMesh.rotation.x = -Math.PI / 2;
+  causticMesh.position.y = 0.006;
+  APP.scene.add(causticMesh);
+
+  const particles = [];
+  for (let i = 0; i < MAX_P; i++) {
+    particles.push({
+      active: false,
+      p: new THREE.Vector3(0, -10, 0),
+      v: new THREE.Vector3(),
+      r: 0.022 + Math.random() * 0.014,
+      inHand: false
+    });
+  }
+
+  const emitters = [];
+  const dummy = new THREE.Object3D();
+
+  APP.realism.water = {
+    particles, emitters, inst, causticMesh,
+    spawnDrop(pos, vel) {
+      for (let i = 0; i < MAX_P; i++) {
+        if (!particles[i].active) {
+          particles[i].active = true;
+          particles[i].p.copy(pos);
+          particles[i].v.copy(vel);
+          particles[i].inHand = false;
+          return;
+        }
+      }
+      // Recycle oldest
+      const p = particles[Math.floor(Math.random() * MAX_P)];
+      p.p.copy(pos);
+      p.v.copy(vel);
+      p.active = true;
+    }
+  };
+
+  APP.onTick('volumetric_water_loop', 0, (dt, t) => {
+    const stepDt = Math.min(dt, 0.033);
+    const wind = APP.worldWind || new THREE.Vector3(0.2, 0, 0.1);
+    const planes = APP.roomPlanes ? APP.roomPlanes() : [];
+
+    // Continuous pour emitters
+    for (const em of emitters) {
+      if (t > em.endTime) continue;
+      for (let k = 0; k < 4; k++) {
+        const jitter = new THREE.Vector3((Math.random() - 0.5) * 0.03, 0, (Math.random() - 0.5) * 0.03);
+        APP.realism.water.spawnDrop(em.pos.clone().add(jitter), em.vel.clone().add(jitter.multiplyScalar(4)));
+      }
+    }
+
+    let avgX = 0, avgZ = 0, activeCount = 0;
+
+    for (let i = 0; i < MAX_P; i++) {
+      const a = particles[i];
+      if (!a.active) {
+        dummy.position.set(0, -20, 0);
+        dummy.scale.setScalar(0.001);
+        dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+        continue;
+      }
+
+      activeCount++;
+      avgX += a.p.x;
+      avgZ += a.p.z;
+
+      // Gravity + subtle wind
+      a.v.y -= 9.2 * stepDt;
+      a.v.x += wind.x * 0.12 * stepDt;
+      a.v.z += wind.z * 0.12 * stepDt;
+
+      // Hand interaction: cup/hold water in open hand, or splash/wave in hand velocity direction
+      if (APP.hands) {
+        for (const side of ['left', 'right']) {
+          const h = APP.hands[side];
+          if (!h || !h.wp) continue;
+          const dist = a.p.distanceTo(h.wp);
+          if (dist < 0.14) {
+            const speed = h.vel ? h.vel.length() : 0;
+            if (speed > 0.35) {
+              // Directional wave & splash along hand movement
+              a.v.addScaledVector(h.vel, 1.35);
+              a.v.y += 0.45;
+              a.inHand = false;
+            } else if (!h.sqz) {
+              // Cup & hold water in palm
+              a.p.lerp(h.wp.clone().add(new THREE.Vector3(0, 0.035, 0)), 0.32);
+              a.v.multiplyScalar(0.45);
+              a.inHand = true;
+            }
+          }
+        }
+      }
+
+      // SPH-like lightweight neighbor repulsion for volumetric thickness & wave propagation
+      for (let j = i + 1; j < Math.min(i + 18, MAX_P); j++) {
+        const b = particles[j];
+        if (!b.active) continue;
+        const dx = a.p.x - b.p.x;
+        const dy = a.p.y - b.p.y;
+        const dz = a.p.z - b.p.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > 0.00001 && d2 < 0.0036) {
+          const inv = (0.06 - Math.sqrt(d2)) * 18.0 * stepDt;
+          a.v.x += dx * inv; a.v.y += dy * inv * 0.5; a.v.z += dz * inv;
+          b.v.x -= dx * inv; b.v.y -= dy * inv * 0.5; b.v.z -= dz * inv;
+        }
+      }
+
+      a.p.addScaledVector(a.v, stepDt);
+
+      // Floor collision & puddle spreading
+      if (a.p.y < a.r) {
+        a.p.y = a.r;
+        if (a.v.y < -0.6) {
+          a.v.y *= -0.22;
+          a.v.x += (Math.random() - 0.5) * 0.35;
+          a.v.z += (Math.random() - 0.5) * 0.35;
+        } else {
+          a.v.y = 0;
+          a.v.x *= 0.94;
+          a.v.z *= 0.94;
+        }
+      }
+
+      // AR Room Wall & Surface collisions
+      for (const pl of planes) {
+        if (!pl.pos || !pl.normal) continue;
+        const rel = a.p.clone().sub(pl.pos);
+        const distToPlane = rel.dot(pl.normal);
+        if (Math.abs(distToPlane) < 0.04 && rel.length() < Math.max(pl.w || 2, pl.h || 2) * 0.6) {
+          a.p.addScaledVector(pl.normal, 0.04 - distToPlane);
+          a.v.reflect(pl.normal).multiplyScalar(0.35);
+        }
+      }
+
+      // Wet nearby entity materials
+      const spd = a.v.length();
+      dummy.position.copy(a.p);
+      dummy.scale.set(a.r * 38, a.r * (32 + Math.min(26, spd * 14)), a.r * 38);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+
+    inst.instanceMatrix.needsUpdate = true;
+    if (activeCount > 0) {
+      causticMesh.visible = true;
+      causticMesh.position.set(avgX / activeCount, 0.008, avgZ / activeCount);
+    } else {
+      causticMesh.visible = false;
+    }
+  }, null, true);
+}
+
+const spawnOrigin = APP.spawnPos ? APP.spawnPos(1.2, 0) : new THREE.Vector3(0, 1.3, -1.2);
+if (isPool) {
+  for (let i = 0; i < 220; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const rad = Math.sqrt(Math.random()) * 0.55;
+    APP.realism.water.spawnDrop(
+      new THREE.Vector3(spawnOrigin.x + Math.cos(ang) * rad, 0.04 + Math.random() * 0.12, spawnOrigin.z + Math.sin(ang) * rad),
+      new THREE.Vector3(0, 0, 0)
+    );
+  }
+  APP.say('Volumetric water pool created. Move your hand through it to make waves or cup water.');
+} else if (isPour) {
+  const pourPos = spawnOrigin.clone();
+  pourPos.y = Math.max(1.25, pourPos.y);
+  APP.realism.water.emitters.push({
+    pos: pourPos,
+    vel: new THREE.Vector3(0, -0.4, 0),
+    endTime: APP.NOW() + 14.0
+  });
+  APP.say('Pouring volumetric water. Hold your hand under the stream to catch and splash it.');
+}
+if (APP.sfx) APP.sfx.play('splash');
+
+@ability: volumetric_fire_sim
+@pin
+@match: fire | flames | draw with fire | fire wall | نار | لهب | ارسم بالنار
+@code:
+const THREE = APP.THREE;
+const drawMode = /(draw|paint|write|surface|ارسم|اكتب|جدار)/.test((text || '').toLowerCase());
+
+if (!APP.realism) APP.realism = {};
+if (!APP.realism.fire) {
+  const MAX_F = 320;
+  const fGeo = new THREE.DodecahedronGeometry(0.045, 1);
+  const fMat = new THREE.MeshBasicMaterial({
+    color: '#ff7b1c', transparent: true, opacity: 0.78,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  const fInst = new THREE.InstancedMesh(fGeo, fMat, MAX_F);
+  fInst.userData.skipMatrixShader = true;
+  APP.scene.add(fInst);
+
+  // Heat Distortion Shimmer Shell
+  const heatGeo = new THREE.SphereGeometry(0.45, 20, 20);
+  const heatMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false,
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `
+      uniform float uTime;
+      varying float vFade;
+      void main() {
+        vec3 p = position;
+        p.x += sin(uTime * 11.0 + p.y * 14.0) * 0.025;
+        p.z += cos(uTime * 9.5 + p.y * 12.0) * 0.025;
+        vFade = smoothstep(-0.4, 0.4, p.y);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying float vFade;
+      void main() {
+        gl_FragColor = vec4(1.0, 0.65, 0.25, 0.07 * (1.0 - vFade));
+      }
+    `
+  });
+  const heatMesh = new THREE.Mesh(heatGeo, heatMat);
+  heatMesh.visible = false;
+  APP.scene.add(heatMesh);
+
+  const fireLight = new THREE.PointLight('#ff6a1a', 2.4, 5.5);
+  fireLight.visible = false;
+  APP.scene.add(fireLight);
+
+  const flames = [];
+  for (let i = 0; i < MAX_F; i++) {
+    flames.push({
+      active: false, age: 0, life: 1,
+      p: new THREE.Vector3(), v: new THREE.Vector3(), s: 1
+    });
+  }
+
+  const sources = [];
+  const dummy = new THREE.Object3D();
+  const cHot = new THREE.Color('#fff1a8');
+  const cMid = new THREE.Color('#ff5e00');
+  const cSmoke = new THREE.Color('#241815');
+  const tmpColor = new THREE.Color();
+
+  APP.realism.fire = {
+    sources, flames, drawActive: false,
+    addSource(pos, radius = 0.16) {
+      sources.push({ pos: pos.clone(), radius });
+      if (sources.length > 40) sources.shift();
+    },
+    spawnFlame(pos, rad) {
+      for (let i = 0; i < MAX_F; i++) {
+        if (!flames[i].active) {
+          const f = flames[i];
+          f.active = true;
+          f.age = 0;
+          f.life = 0.45 + Math.random() * 0.55;
+          f.p.copy(pos).add(new THREE.Vector3((Math.random() - 0.5) * rad, 0, (Math.random() - 0.5) * rad));
+          f.v.set((Math.random() - 0.5) * 0.18, 0.65 + Math.random() * 0.75, (Math.random() - 0.5) * 0.18);
+          f.s = 0.65 + Math.random() * 0.9;
+          return;
+        }
+      }
+    }
+  };
+
+  APP.onTick('volumetric_fire_loop', 0, (dt, t) => {
+    const wind = APP.worldWind || new THREE.Vector3(0.4, 0, 0.15);
+    heatMat.uniforms.uTime.value = t;
+
+    // Fire Drawing Mode: paint flames onto surfaces or air with pinched/active hand
+    if (APP.realism.fire.drawActive && APP.hands) {
+      for (const side of ['left', 'right']) {
+        const h = APP.hands[side];
+        if (h && h.tipWp && (h.act || h.sqz)) {
+          APP.realism.fire.addSource(h.tipWp, 0.06);
+        }
+      }
+    }
+
+    // Spawn from active fire sources
+    for (const src of sources) {
+      if (Math.random() < 0.7) APP.realism.fire.spawnFlame(src.pos, src.radius);
+    }
+
+    let activeCount = 0;
+    const avg = new THREE.Vector3();
+
+    for (let i = 0; i < MAX_F; i++) {
+      const f = flames[i];
+      if (!f.active) {
+        dummy.position.set(0, -20, 0);
+        dummy.scale.setScalar(0.001);
+        dummy.updateMatrix();
+        fInst.setMatrixAt(i, dummy.matrix);
+        continue;
+      }
+
+      f.age += dt;
+      if (f.age >= f.life) {
+        f.active = false;
+        continue;
+      }
+
+      const k = f.age / f.life;
+      activeCount++;
+      avg.add(f.p);
+
+      // Buoyancy + turbulent wind curl
+      f.v.x += (wind.x * 0.9 + Math.sin(t * 7.0 + i) * 0.45) * dt;
+      f.v.z += (wind.z * 0.9 + Math.cos(t * 6.5 + i) * 0.45) * dt;
+      f.v.y += 0.55 * dt;
+
+      // Hand movement pushes & swirls flames realistically
+      if (APP.hands) {
+        for (const side of ['left', 'right']) {
+          const h = APP.hands[side];
+          if (h && h.wp && h.vel && f.p.distanceTo(h.wp) < 0.28) {
+            f.v.addScaledVector(h.vel, 1.8 * dt * 10);
+          }
+        }
+      }
+
+      f.p.addScaledVector(f.v, dt);
+
+      const scale = f.s * (1.0 - k * 0.78);
+      dummy.position.copy(f.p);
+      dummy.scale.set(scale, scale * (1.3 + k * 0.8), scale);
+      dummy.rotation.set(t * 2 + i, t * 1.5, 0);
+      dummy.updateMatrix();
+      fInst.setMatrixAt(i, dummy.matrix);
+
+      if (k < 0.35) tmpColor.lerpColors(cHot, cMid, k / 0.35);
+      else tmpColor.lerpColors(cMid, cSmoke, (k - 0.35) / 0.65);
+      fInst.setColorAt(i, tmpColor);
+    }
+
+    fInst.instanceMatrix.needsUpdate = true;
+    if (fInst.instanceColor) fInst.instanceColor.needsUpdate = true;
+
+    if (activeCount > 0) {
+      avg.divideScalar(activeCount);
+      heatMesh.visible = true;
+      heatMesh.position.copy(avg).add(new THREE.Vector3(0, 0.22, 0));
+      fireLight.visible = true;
+      fireLight.position.copy(avg).add(new THREE.Vector3(0, 0.15, 0));
+      fireLight.intensity = 2.0 + Math.sin(t * 18.0) * 0.55 + Math.cos(t * 27.0) * 0.25;
+    } else {
+      heatMesh.visible = false;
+      fireLight.visible = false;
+    }
+  }, null, true);
+}
+
+if (drawMode) {
+  APP.realism.fire.drawActive = true;
+  APP.say('Fire drawing enabled. Pinch and move your hand along any wall or surface to draw living flames.');
+} else {
+  const pos = APP.spawnPos ? APP.spawnPos(1.2, 0) : new THREE.Vector3(0, 0.05, -1.2);
+  pos.y = 0.05;
+  APP.realism.fire.addSource(pos, 0.22);
+  APP.say('Volumetric fire ignited with heat distortion. Sweep your hand through the flames to bend them.');
+}
+if (APP.sfx) APP.sfx.play('burn');
+
+@ability: realistic_finger_grab
+@autorun
+@code:
+const THREE = APP.THREE;
+if (APP.realism && APP.realism._fingerGrabInit) return;
+if (!APP.realism) APP.realism = {};
+APP.realism._fingerGrabInit = true;
+
+// Visual collision-clamped finger contact proxies (prevents ghosting through objects)
+const proxyGeo = new THREE.SphereGeometry(0.012, 10, 10);
+const proxyMat = APP.craft.mat({ tex: 'cyber', color: '#88ddff', rough: 0.2, opacity: 0.55 });
+proxyMat.transparent = true;
+
+const fingerProxies = { left: [], right: [] };
+for (const side of ['left', 'right']) {
+  for (let i = 0; i < 5; i++) {
+    const m = new THREE.Mesh(proxyGeo, proxyMat);
+    m.visible = false;
+    APP.scene.add(m);
+    fingerProxies[side].push(m);
+  }
+}
+
+const activeWrap = { left: null, right: null };
+const _box = new THREE.Box3();
+const _clamped = new THREE.Vector3();
+
+APP.onTick('realistic_finger_grab_loop', 0, (dt) => {
+  if (!APP.hands || !APP.findEntities) return;
+  const ents = APP.findEntities('all');
+
+  for (const side of ['left', 'right']) {
+    const h = APP.hands[side];
+    const proxies = fingerProxies[side];
+    if (!h || !h.wp) {
+      proxies.forEach((p) => { p.visible = false; });
+      continue;
+    }
+
+    const tips = (h.fingerTips && h.fingerTips.length >= 2) ? h.fingerTips : [h.tipWp || h.wp];
+    let bestEnt = null;
+    let bestContacts = 0;
+    const contactPoints = [];
+
+    for (const ent of ents) {
+      if (!ent || !ent.root || ent.grabbable === false) continue;
+      _box.setFromObject(ent.root);
+      if (_box.isEmpty()) continue;
+
+      let contacts = 0;
+      const pts = [];
+      for (let i = 0; i < Math.min(tips.length, 5); i++) {
+        const tp = tips[i];
+        if (!tp) continue;
+        _box.clampPoint(tp, _clamped);
+        const dist = tp.distanceTo(_clamped);
+        // Finger is touching or attempting to pass through the object
+        if (dist < 0.045 || _box.containsPoint(tp)) {
+          contacts++;
+          pts.push(_clamped.clone());
+        }
+      }
+
+      if (contacts > bestContacts) {
+        bestContacts = contacts;
+        bestEnt = ent;
+        contactPoints.length = 0;
+        pts.forEach((p) => contactPoints.push(p));
+      }
+    }
+
+    // Clamp visual finger proxies to the object's exterior surface (anti-ghost collision)
+    for (let i = 0; i < 5; i++) {
+      if (i < contactPoints.length) {
+        proxies[i].visible = true;
+        proxies[i].position.copy(contactPoints[i]);
+      } else {
+        proxies[i].visible = false;
+      }
+    }
+
+    // Multi-finger wrap grab (2+ fingers wrapping or active grip on surface)
+    if (bestEnt && (bestContacts >= 2 || (bestContacts >= 1 && (h.sqz || h.act)))) {
+      if (!activeWrap[side] || activeWrap[side].ent !== bestEnt) {
+        activeWrap[side] = {
+          ent: bestEnt,
+          offset: bestEnt.root.position.clone().sub(h.wp)
+        };
+      }
+      const targetPos = h.wp.clone().add(activeWrap[side].offset);
+      // Smooth physical follow with floor collision
+      bestEnt.root.position.lerp(targetPos, Math.min(1, dt * 16));
+      if (bestEnt.root.position.y < 0.02) bestEnt.root.position.y = 0.02;
+    } else {
+      activeWrap[side] = null;
+    }
+  }
+}, null, true);
+
+@ability: realism_ai_bot_tools
+@autorun
+@code:
+if (!APP.bot || !APP.bot.registerTool) return;
+
+APP.bot.registerTool(
+  {
+    name: 'spawn_volumetric_water',
+    description: 'Spawn realistic volumetric water that the user can pour, pool, splash, or hold in their hand.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        mode: { type: 'STRING', description: 'Either pour or pool' }
+      }
+    }
+  },
+  async (args) => {
+    const cmd = (args && args.mode === 'pool') ? 'water pool' : 'pour water';
+    if (APP.matchAndRun) APP.matchAndRun(cmd);
+    return { ok: true, mode: cmd };
+  }
+);
+
+APP.bot.registerTool(
+  {
+    name: 'spawn_volumetric_fire',
+    description: 'Spawn realistic volumetric fire with heat distortion and wind reaction, or enable drawing with fire on surfaces.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        mode: { type: 'STRING', description: 'Either bonfire or draw' }
+      }
+    }
+  },
+  async (args) => {
+    const cmd = (args && args.mode === 'draw') ? 'draw with fire' : 'fire';
+    if (APP.matchAndRun) APP.matchAndRun(cmd);
+    return { ok: true, mode: cmd };
+  }
+);
+
+APP.bot.registerTool(
+  {
+    name: 'set_realism_atmosphere',
+    description: 'Adjust realistic atmospheric effects like dust particles, wetness, wind strength, or caustics.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        dust: { type: 'BOOLEAN' },
+        wetness: { type: 'NUMBER' },
+        windStrength: { type: 'NUMBER' }
+      }
+    }
+  },
+  async (args) => {
+    if (!APP.realism) return { ok: false };
+    if (typeof args.dust === 'boolean') APP.realism.config.dustEnabled = args.dust;
+    if (typeof args.wetness === 'number') {
+      APP.realism.config.globalWetness = APP.clamp(args.wetness, 0, 1);
+      APP.realism.uniformsList.forEach((u) => { u.uWetness.value = APP.realism.config.globalWetness; });
+    }
+    if (typeof args.windStrength === 'number') APP.realism.config.windStrength = APP.clamp(args.windStrength, 0, 4);
+    return { ok: true, config: APP.realism.config };
+  }
+);
