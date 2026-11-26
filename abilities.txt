@@ -1878,3 +1878,101 @@ await APP.createProcedural({
     group.add(tail);
   `
 });
+
+@ability: spawn_dog
+@match: create & dog | dog
+@code:
+const THREE = APP.THREE;
+const dog = await APP.createProcedural({
+  name: "dog",
+  dist: 2.0,
+  yaw: 0,
+  code: `
+    const V3 = THREE.Vector3;
+    const mat = APP.craft.mat({ tex: 'fur', color: '#8b5a2b', roughness: 0.9 });
+    const darkMat = APP.craft.mat({ tex: 'fur', color: '#4a2e16', roughness: 0.9 });
+    const noseMat = APP.craft.mat({ tex: ' кожа', color: '#111111', roughness: 0.5 });
+    const eyeMat = APP.craft.mat({ tex: ' glass', color: '#1a1105', roughness: 0.1 });
+
+    // Body
+    const bodyGeo = new THREE.CapsuleGeometry(0.35, 0.8, 16, 32);
+    bodyGeo.translate(0, 0, 0);
+    const body = new THREE.Mesh(bodyGeo, mat);
+    body.position.set(0, 0.6, 0);
+    body.rotation.z = Math.PI / 2;
+    group.add(body);
+
+    // Head
+    const headGroup = new THREE.Group();
+    headGroup.position.set(0.65, 1.15, 0);
+    group.add(headGroup);
+
+    const headGeo = new THREE.SphereGeometry(0.25, 32, 32);
+    headGeo.scale(1, 0.8, 1.2);
+    const head = new THREE.Mesh(headGeo, mat);
+    headGroup.add(head);
+
+    // Snout
+    const snoutGeo = new THREE.CylinderGeometry(0.12, 0.15, 0.25, 16);
+    snoutGeo.rotateX(Math.PI / 2);
+    const snout = new THREE.Mesh(snoutGeo, darkMat);
+    snout.position.set(0.2, -0.05, 0.1);
+    headGroup.add(snout);
+
+    // Nose
+    const noseGeo = new THREE.SphereGeometry(0.06, 16, 16);
+    const nose = new THREE.Mesh(noseGeo, noseMat);
+    nose.position.set(0.32, -0.05, 0.1);
+    headGroup.add(nose);
+
+    // Ears
+    const earGeo = new THREE.ConeGeometry(0.08, 0.3, 16);
+    earGeo.rotateZ(-Math.PI / 4);
+    const leftEar = new THREE.Mesh(earGeo, darkMat);
+    leftEar.position.set(-0.05, 0.15, 0.15);
+    leftEar.rotation.x = 0.2;
+    headGroup.add(leftEar);
+
+    const rightEar = leftEar.clone();
+    rightEar.position.set(-0.05, 0.15, -0.15);
+    rightEar.rotation.z = Math.PI / 4;
+    rightEar.rotation.x = -0.2;
+    headGroup.add(rightEar);
+
+    // Eyes
+    const eyeGeo = new THREE.SphereGeometry(0.04, 16, 16);
+    const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+    leftEye.position.set(0.15, 0.05, 0.18);
+    headGroup.add(leftEye);
+
+    const rightEye = leftEye.clone();
+    rightEye.position.set(0.15, 0.05, -0.18);
+    headGroup.add(rightEye);
+
+    // Legs
+    const legGeo = new THREE.CapsuleGeometry(0.08, 0.5, 16, 32);
+    legGeo.translate(0, -0.25, 0);
+
+    const createLeg = (x, z) => {
+      const leg = new THREE.Mesh(legGeo, mat);
+      leg.position.set(x, 0.6, z);
+      group.add(leg);
+    };
+
+    createLeg(0.5, 0.2);
+    createLeg(0.5, -0.2);
+    createLeg(-0.5, 0.2);
+    createLeg(-0.5, -0.2);
+
+    // Tail
+    const tailGeo = new THREE.CylinderGeometry(0.05, 0.02, 0.4, 16);
+    tailGeo.rotateX(Math.PI / 4);
+    const tail = new THREE.Mesh(tailGeo, mat);
+    tail.position.set(-0.7, 0.85, 0);
+    tail.rotation.z = -0.2;
+    group.add(tail);
+
+    group.traverse(c => { if (c.isMesh) c.castShadow = true; });
+  `
+});
+dog.semanticTag = "quadruped";
