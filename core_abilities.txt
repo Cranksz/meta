@@ -1,0 +1,237 @@
+@ability: core_router_module
+@autorun
+@code:
+const { $, say, normalizeText, loadedTxtFiles, entities, importedImages, importedGLBs, shouldUseGLB, resolveGLB, spawnGLB, runAbility, ai } = APP;
+const aiState = ai.state;
+
+function isHtmlEditPrompt(rawText) {
+  const s = String(rawText || '');
+  return /(\bhtml\b|say-it-see-it\.html|الـ?\s*html|تعديل\s+(?:الصفحة|الواجهة|الكود|التصميم|الشريط)|عد[ّ]?ل\s+(?:الـ?\s*html|الصفحة|الواجهة|الشريط|زر|لون)|أضف\s+زر\s+(?:في|لـ)\s*(?:الصفحة|الواجهة|الشريط)|edit\s+html|patch\s+html|modify\s+(?:the\s+)?(?:html|page|ui|css))/i.test(s);
+}
+
+function getRepoInspirations() {
+  const chunks = [];
+  for (const [fname, content] of loadedTxtFiles.entries()) {
+    if (/^(craft_3d|ai_models|toolbar_ui|ai_studio|bot_brain|voice_stt|core_abilities)\.txt$/i.test(fname)) continue;
+    // Strip comment banner lines so real craft rules and abilities fit cleanly
+    const clean = String(content || '')
+      .replace(/^[ \t]*#[ \t]*=+[\s\S]*?\n(?=@ability|\w)/m, '')
+      .replace(/^[ \t]*# ?/gm, '')
+      .trim();
+    if (clean) chunks.push(`--- ${fname} ---\n${clean.slice(0, 2200)}`);
+  }
+  return chunks.join('\n\n').slice(0, 7500);
+}
+
+function matchBestAbility(norm, includeFallback = false) {
+  let best = null, bestScore = 0;
+  for (const ab of (APP.parsedAbilities || [])) {
+    if (ab.autorun) continue;
+    if (!includeFallback && ab.fallback) continue;
+    if (includeFallback && !ab.fallback) continue;
+    for (const pat of ab.matches) {
+      const terms = pat.split('&').map(t => normalizeText(t)).filter(Boolean);
+      if (terms.length && terms.every(t => norm.includes(t))) {
+        const sc = terms.length * 100 + terms.reduce((s, t) => s + t.length, 0);
+        if (sc > bestScore) { bestScore = sc; best = ab; }
+      }
+    }
+  }
+  return best;
+}
+
+const CRAFT_CONTRACT = `AVAILABLE IN-SCOPE VARIABLES INSIDE <<<CREATE>>>:
+- \`group\` (THREE.Group — REQUIRED: add ALL meshes to \`group\`, NEVER call scene.add!)
+- \`THREE\` (Three.js r147), \`V3\` (THREE.Vector3), \`APP\`
+- \`APP.craft.mat({ color, tex:'wood'|'stone'|'metal'|'carbon'|'ice'|'marble'|'gold'|'water'|'lava'|'brick'|'mosaic'|'galaxy'|'cyber'|'neon', rough, metal, clearcoat, emissive, opacity, repeat, doubleSide })\`
+- \`APP.craft.organicSphere(radius, segs, noiseAmp, freq, mat, [sx,sy,sz])\`
+- \`APP.craft.lathe([[r, y], ...], segs, mat)\`
+- \`APP.craft.tube([[x,y,z], ...], radius, segs, mat, closed)\`
+- \`APP.craft.bevelBox(w, h, d, bevel, mat)\`
+- \`APP.craft.waterJet(group, [x,y,z], count, spread, speed, floorY)\`
+- \`APP.onTick((dt, t) => { ... })\` for subtle idle/living animations (tail wag, breathing, rotors, glowing pulse).
+
+SCULPTING QUALITY & REALISM RULES:
+1. NEVER refuse any 3D object, animal, creature, vehicle, or scene request. NEVER say you need a .glb file.
+2. Build cohesive, realistic, multi-part anatomy (14-32 overlapping smooth parts using lathe, tube, organicSphere, bevelBox — NOT disconnected blocky cubes!).
+   - Example for animals (dog/cat/horse): sculpted torso (organicSphere/lathe), neck, skull, snout/muzzle, nose, glossy eyes with pupils, ears, 4 jointed legs (upper+lower+paws), curved tube tail, collar/details, plus gentle breathing/tail-wagging via APP.onTick.
+3. Build upright centered near x=0, z=0 with lowest point around y=0, total height ~0.6m to 1.6m.
+4. Reply in the same language as the user (Arabic or English). NEVER speak Spanish unless asked.`;
+
+async function creativeBuilder(rawText, mode = 'both') {
+  const isPureAi = mode === 'ai';
+  say(isPureAi ? '✨ إبداع سريع بالذكاء فقط...' : '⚡ إلهام من التعليمات + إبداع AI...');
+
+  const inspirations = isPureAi ? '' : getRepoInspirations();
+  const sys = isPureAi
+    ? `You are an expert Three.js 3D Sculptor for "Say It, See It".
+ACTIVE SCENE: ${entities.map(e => `${e.name}(${e.type})`).join(', ') || 'none'} | PHOTOS: ${[...importedImages.keys()].join(', ') || 'none'}
+${CRAFT_CONTRACT}
+
+Output ONLY:
+<<<CREATE name="object_name">>>
+// Three.js code adding detailed meshes to \`group\`
+<<<END_CREATE>>>
+<<<SAY>>>
+تأكيد قصير بلغة المستخدم
+<<<END_SAY>>>`
+    : `You are an expert Three.js WebXR 3D Artist & Engineer for "Say It, See It".
+Strictly apply the Realism, Materials, Physics, and Craftsmanship rules from the repository instructions below!
+
+=== REPOSITORY INSTRUCTIONS & REALISM GUIDE ===
+${inspirations || 'Use realistic multi-part PBR materials, contact details, and living motion.'}
+=== LEARNED USER RULES ===
+${JSON.stringify(APP.liveCompanion?.memory?.learnedRules || [])}
+=== LIVE SCENE ===
+Active: ${entities.map(e => `${e.name}(${e.type})`).join(', ') || 'none'} | Photos: ${[...importedImages.keys()].join(', ') || 'none'} | GLBs: ${[...importedGLBs.keys()].join(', ') || 'none'}
+
+${CRAFT_CONTRACT}
+To modify/animate an existing entity instead of creating a new one, output <<<ATTACH target="last">>> ...JS using \`ent\`/\`root\`... <<<END_ATTACH>>>.
+
+OUTPUT FORMAT:
+<<<CREATE name="object_name">>>
+// Realistic multi-part Three.js code adding meshes to \`group\`
+<<<END_CREATE>>>
+<<<SAY>>>
+تأكيد قصير بلغة المستخدم
+<<<END_SAY>>>`;
+
+  try {
+    const prevThink = $('aiThink') ? $('aiThink').value : 'high';
+    if (isPureAi && $('aiThink')) $('aiThink').value = 'low';
+    let res;
+    try { res = await ai.callAnyProviderRaw(sys, `USER REQUEST: ${rawText}`, $('aiModel')?.value); }
+    finally { if (isPureAi && $('aiThink')) $('aiThink').value = prevThink; }
+
+    let raw = res.text;
+    const modelUsed = res.modelUsed;
+    let didSomething = false;
+    let lastError = '';
+
+    const runParsedOutput = async (txt) => {
+      didSomething = false;
+      lastError = '';
+      const createRe = /<<<CREATE(?:\s+name\s*=\s*["']([^"']+)["'])?\s*>>>([\s\S]*?)<<<END_CREATE>>>/gi;
+      let m;
+      while ((m = createRe.exec(txt)) !== null) {
+        const r = await APP.liveCompanion.executeToolCall('create_procedural_object', { name: m[1] || 'creation', code: m[2].trim() });
+        if (r.ok) didSomething = true;
+        else lastError = r.error || 'Build failed';
+      }
+      const attachRe = /<<<ATTACH(?:\s+target\s*=\s*["']([^"']+)["'])?\s*>>>([\s\S]*?)<<<END_ATTACH>>>/gi;
+      while ((m = attachRe.exec(txt)) !== null) {
+        const r = await APP.liveCompanion.executeToolCall('attach_entity_behavior', { target: m[1] || 'last', code: m[2].trim() });
+        if (r.ok) didSomething = true;
+        else lastError = r.error || 'Attach failed';
+      }
+      if (!didSomething && !lastError) {
+        const jsonM = txt.match(/<<<JSON>>>([\s\S]*?)<<<END_JSON>>>/i);
+        try {
+          const obj = ai.parseJsonSafe(jsonM ? jsonM[1] : txt);
+          if (Array.isArray(obj.toolCalls)) {
+            for (const tc of obj.toolCalls) {
+              const r = await APP.liveCompanion.executeToolCall(tc.name, tc.args || {});
+              if (r?.ok !== false) didSomething = true;
+            }
+          }
+        } catch {}
+      }
+    };
+
+    await runParsedOutput(raw);
+
+    // Self-repair once if the generated Three.js code had a runtime/syntax error
+    if (!didSomething && lastError) {
+      say('🔧 جاري إصلاح الكود تلقائياً...');
+      const fixRes = await ai.callAnyProviderRaw(sys, `Your previous <<<CREATE>>> code for "${rawText}" threw an error:\n${lastError}\n\nFix the JS code and return valid <<<CREATE name="...">>>...<<<END_CREATE>>> using ONLY \`group\`, \`THREE\`, \`V3\`, and \`APP.craft\`.`, $('aiModel')?.value);
+      await runParsedOutput(fixRes.text);
+      raw = fixRes.text;
+    }
+
+    const sayM = raw.match(/<<<SAY>>>([\s\S]*?)<<<END_SAY>>>/i);
+    if (didSomething) {
+      say(sayM ? `✅ (${modelUsed}) ${sayM[1].trim()}` : `✅ تم الإنشاء عبر ${modelUsed}`);
+      return;
+    }
+    say(lastError ? `❌ خطأ بناء: ${lastError}` : '⚠️ لم يتم توليد الشكل — جرّب وصفاً أوضح.');
+  } catch (e) {
+    console.warn('Creative builder err:', e);
+    say('❌ ' + (e.message || e));
+  }
+}
+
+APP.runPrescriptByText = function (rawText) {
+  const norm = normalizeText(rawText);
+  if (!norm) return { ok: false, error: 'Empty command' };
+  const ab = matchBestAbility(norm, false) || matchBestAbility(norm, true);
+  if (ab) { runAbility(ab, rawText); return { ok: true, ability: ab.id }; }
+  return { ok: false, error: 'لم يطابق أي تعليمة مكتوبة في الملفات' };
+};
+
+APP.router = function (rawText) {
+  const norm = normalizeText(rawText);
+  if (!norm) return false;
+  const mode = APP.execMode || 'both';
+
+  // MODE 1: INSTRUCTIONS ONLY
+  if (mode === 'instructions') {
+    const direct = APP.runPrescriptByText(rawText);
+    if (direct.ok) return true;
+    if (APP.liveCompanion?.enabled) {
+      APP.liveCompanion.sendTextFeedback(rawText);
+      return true;
+    }
+    say('📜 وضع التعليمات فقط: لم يطابق أي تعليمة مكتوبة');
+    return false;
+  }
+
+  // HTML live edit in 'ai' and 'both' modes
+  if (isHtmlEditPrompt(rawText)) {
+    APP.editHtmlFromPrompt?.(rawText, { forceHtml: true, fromMainTape: true, autoCommitIfToken: Boolean(aiState.githubToken) });
+    return true;
+  }
+
+  // Imported GLB explicit check
+  if (shouldUseGLB(rawText)) {
+    const file = resolveGLB(rawText), base = file.replace(/\.(glb|gltf)$/i, '');
+    if (importedGLBs.has(file) || importedGLBs.has(base + '.glb')) {
+      say('📦 ' + file);
+      spawnGLB({ file, name: base, height: 1.4 });
+      return true;
+    }
+  }
+
+  // MODE 2: AI ONLY
+  if (mode === 'ai') {
+    if (APP.liveCompanion?.enabled) { APP.liveCompanion.sendTextFeedback(rawText); return true; }
+    creativeBuilder(rawText, 'ai');
+    return true;
+  }
+
+  // MODE 3: BOTH — Run matching repo abilities first, otherwise create with AI + instructions
+  const matchedAb = matchBestAbility(norm, false);
+  if (matchedAb) {
+    runAbility(matchedAb, rawText);
+    return true;
+  }
+  if (APP.liveCompanion?.enabled) { APP.liveCompanion.sendTextFeedback(rawText); return true; }
+  creativeBuilder(rawText, 'both');
+  return true;
+};
+
+if (aiState.githubToken && !window.__memPulledOnce) {
+  window.__memPulledOnce = true;
+  APP.liveCompanion?.pullMemoryFromGitHub?.();
+}
+
+@ability: delete_all
+@match: delete | clear | احذف | امسح
+@do: APP.clear();
+
+@ability: env_construct
+@match: construct | كونستراكت | الغرفة البيضاء
+@do: APP.setEnv('construct_gray'); APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 5);
+
+@ability: env_matrix
+@match: matrix | ماتريكس
+@do: APP.setEnv('matrix_black'); APP.fx.groundPulse(APP.headPos.x, APP.headPos.z, 5);
