@@ -1780,3 +1780,23 @@ if (sess && sess.environmentBlendMode === "opaque" && navigator.xr) {
 }
 APP.renderer.setClearAlpha(0); APP.scene.background = null; APP.scene.fog = null;
 APP.say("👁 تم تفعيل الرؤية الواقعية (Passthrough)");
+
+@ability: spawn_girl_sculpture
+@match: make a girl | girl | build a girl
+@code:
+await APP.createProcedural({ name: "girl_sculpture", dist: 2.0, yaw: 0, code: \`
+  const mat = APP.craft.mat({ tex: 'gold', color: '#ddc590', roughness: 0.2, metalness: 0.8 });
+  const headMat = APP.craft.mat({ tex: 'marble', color: '#ffeadb', roughness: 0.3 });
+  
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 32, 32), headMat);
+  head.position.y = 1.2;
+  group.add(head);
+
+  const dress = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.4, 0.8, 32), mat);
+  dress.position.y = 0.6;
+  group.add(dress);
+
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.1, 32), mat);
+  base.position.y = 0.15;
+  group.add(base);
+\`});
